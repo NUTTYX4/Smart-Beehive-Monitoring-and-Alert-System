@@ -1,4 +1,4 @@
-﻿# BeeHive Monitor — Full Deployment Instructions
+# BeeHive Monitor — Full Deployment Instructions
 ## Raspberry Pi 4 · Debian Bookworm 64-bit (Headless) · Via PuTTY
 
 > **Read everything in a section before typing any command.**
@@ -226,11 +226,49 @@ $ deactivate
 1. Search for **@userinfobot** in Telegram -> send `/start`.
 2. It replies with your numeric user ID (e.g. `5633775788`).
 
-### Step 7.3 — Get your ThingSpeak write keys
+### Step 7.3 — Set up ThingSpeak channels and get write keys
 
-1. Log in at https://thingspeak.mathworks.com
-2. Open your channel -> **API Keys** tab.
-3. Copy both Write API Keys.
+This project uses **two separate ThingSpeak channels**. You must create both.
+
+---
+
+#### Channel 1 — Environment & Motion  (key: `BEEHIVE_TS_ENV_KEY`)
+
+Log in at https://thingspeak.mathworks.com → **New Channel**, name it e.g. `BeeHive - Env & Motion`.
+
+Set the fields **exactly** in this order (the field numbers must match):
+
+| Field # | Name to enter in ThingSpeak | What it contains        |
+|---------|-----------------------------|-------------------------|
+| Field 1 | `Temperature`               | °C from DHT22           |
+| Field 2 | `Humidity`                  | % from DHT22            |
+| Field 3 | `Accel X`                   | g — MPU6050 X-axis      |
+| Field 4 | `Accel Y`                   | g — MPU6050 Y-axis      |
+| Field 5 | `Accel Z`                   | g — MPU6050 Z-axis      |
+| Field 6 | `Gyro X`                    | °/s — MPU6050 X-axis    |
+| Field 7 | `Gyro Y`                    | °/s — MPU6050 Y-axis    |
+| Field 8 | `Gyro Z`                    | °/s — MPU6050 Z-axis    |
+
+Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_ENV_KEY`.
+
+---
+
+#### Channel 2 — Weight & Audio  (key: `BEEHIVE_TS_WA_KEY`)
+
+Create a second channel, name it e.g. `BeeHive - Weight & Audio`.
+
+Set the fields **exactly** in this order:
+
+| Field # | Name to enter in ThingSpeak | What it contains                |
+|---------|-----------------------------|---------------------------------|
+| Field 1 | `Weight`                    | grams from HX711 load cell      |
+| Field 3 | `Dominant Frequency`        | Hz — dominant bee sound from INMP441 FFT |
+
+> Field 2 is intentionally skipped — the code uploads to field1 and field3 only.
+
+Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_WA_KEY`.
+
+---
 
 ### Step 7.4 — Create the systemd override directory
 
