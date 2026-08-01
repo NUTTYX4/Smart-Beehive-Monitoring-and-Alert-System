@@ -1,0 +1,27 @@
+[Unit]
+Description=BeeHive Monitor Telegram Bot (Raspberry Pi 4)
+After=network-online.target time-sync.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=BEEHIVE_HOME=__PROJECT_DIR__
+ExecStart=__VENV_DIR__/bin/python3 __PROJECT_DIR__/bot.py
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=0
+
+# Give the bot/monitor time to shut down the child monitor subprocess
+# gracefully before systemd sends SIGKILL.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Hardening (kept permissive enough for GPIO/I2C/I2S/audio access).
+NoNewPrivileges=true
+ProtectSystem=full
+SupplementaryGroups=gpio i2c audio spi
+
+[Install]
+WantedBy=multi-user.target

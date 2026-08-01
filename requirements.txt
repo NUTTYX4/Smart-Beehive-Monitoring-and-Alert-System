@@ -1,0 +1,21 @@
+# Core
+numpy>=1.26,<2.0
+scipy>=1.11
+certifi>=2024.2.2
+requests>=2.31
+psutil>=5.9
+
+# Telegram bot (async v20+ API)
+python-telegram-bot>=20.7,<21.0
+
+# Hardware interfaces
+RPi.GPIO>=0.7.1 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+smbus2>=0.4.3
+hx711>=1.1.2.3
+
+# DHT22 (actively maintained CircuitPython driver + board pin definitions)
+adafruit-circuitpython-dht>=4.0.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+adafruit-blinka>=8.20.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+
+# INMP441 I2S microphone capture (native I2S via PortAudio, no ADC/SPI)
+sounddevice>=0.4.6
