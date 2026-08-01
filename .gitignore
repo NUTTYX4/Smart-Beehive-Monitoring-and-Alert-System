@@ -36,3 +36,6 @@ desktop.ini
 
 # pytest
 .pytest_cache/
+
+# Secrets file - NEVER push to git
+token.md
