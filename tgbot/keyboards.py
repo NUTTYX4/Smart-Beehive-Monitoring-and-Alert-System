@@ -32,7 +32,10 @@ def main_menu(is_running: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🖥️ System Info", callback_data="system_info"),
             InlineKeyboardButton("⏱️ Uptime", callback_data="uptime_info"),
         ],
-        [InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings")],
+        [
+            InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings"),
+            InlineKeyboardButton("👥 Manage Admins", callback_data="manage_admins"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 

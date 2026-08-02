@@ -178,7 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if is_approved(user.id):
         await update.message.reply_text(
-            "*👑 Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+            "*Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
             reply_markup=keyboards.main_menu(_is_running()),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -284,6 +284,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     restricted_actions = {
         "start_init_member", "stop_script_member", "change_calibration",
         "check_pi_health", "system_info", "uptime_info", "download_data_csv",
+        "manage_admins",
     }
     if action in restricted_actions and not is_approved(uid):
         await query.answer("🛑 Access Denied. Approved Admin status required.", show_alert=True)
@@ -321,7 +322,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action == "main_menu":
         if is_approved(uid):
             await query.edit_message_text(
-                "*👑 Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+                "*Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
                 reply_markup=keyboards.main_menu(_is_running()),
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -331,6 +332,34 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=keyboards.guest_menu(),
                 parse_mode=ParseMode.MARKDOWN,
             )
+    elif action == "manage_admins":
+        if not is_approved(uid):
+            await query.answer("🛑 Access Denied.", show_alert=True)
+            return
+        members = load_members()
+        lines = [
+            "👥 *Admin Team & Access Management*\n",
+            f"• *Root Admin ID:* `{TELEGRAM_AUTHORIZED_USER_ID}`\n",
+            "*Approved Admin Members:*"
+        ]
+        if not members:
+            lines.append("_No additional admins approved yet._\n")
+        else:
+            for m_id, m_name in members.items():
+                lines.append(f"• `{m_id}`: {m_name}")
+            lines.append("")
+        lines.extend([
+            "*Manual Management Commands:*",
+            "• Promote user: `/addadmin <user_id> [name]`",
+            "• Revoke rights: `/deladmin <user_id>`",
+            "• View full list: `/admins`\n",
+            "_Tip: Unapproved visitors can tap 'Request Admin Access' in guest mode for immediate 1-tap notification approval!_"
+        ])
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
     elif action == "request_admin_access":
         if is_approved(uid):
             await query.answer("✅ You are already an Approved Admin!", show_alert=True)

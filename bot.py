@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 CALLBACK_PATTERN = (
     "^(start_init_member|stop_script_member|status_check|change_calibration|"
     "download_data_csv|check_pi_health|system_info|uptime_info|"
-    "sensor_readings|main_menu|request_admin_access|approve_.*|deny_.*)$"
+    "sensor_readings|main_menu|manage_admins|request_admin_access|approve_.*|deny_.*)$"
 )
 
 
