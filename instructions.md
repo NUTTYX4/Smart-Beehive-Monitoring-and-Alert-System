@@ -317,7 +317,7 @@ export default {
 };
 ```
 
-4. Click **Save and Deploy**. Your Worker will generate an SSL-secured URL, such as: `https://hive-proxy.yourname.workers.dev`.
+4. Click **Save and Deploy**. Your Worker will generate an SSL-secured URL, such as: `https://smart-beehive.nithinvinuthan123.workers.dev`.
 
 ### Configuring Your Raspberry Pi for Unified Bypass:
 Add your Cloudflare Worker URL to your systemd override configuration file:
@@ -328,7 +328,7 @@ sudo nano /etc/systemd/system/beehive.service.d/override.conf
 
 Add the following environment line under `[Service]`:
 ```ini
-Environment=BEEHIVE_TG_BASE_URL=https://hive-proxy.yourname.workers.dev
+Environment=BEEHIVE_TG_BASE_URL=https://smart-beehive.nithinvinuthan123.workers.dev
 ```
 
 Reload and restart the service:
