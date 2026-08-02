@@ -26,6 +26,7 @@ from config import (
     GYRO_ABS_ALERT,
     MOTION_ACCEL_DELTA,
     MOTION_GYRO_DELTA,
+    TELEGRAM_API_BASE,
     TELEGRAM_BOT_TOKEN,
     WEIGHT_MAX_VALID,
     WEIGHT_SUDDEN_JUMP,
@@ -169,7 +170,7 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
 # ----------------------------------------------------------------------
 def send_message(chat_id: str, text: str, parse_mode: Optional[str] = "Markdown") -> bool:
     """Send a message via raw Bot API HTTPS call with retry/backoff."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode

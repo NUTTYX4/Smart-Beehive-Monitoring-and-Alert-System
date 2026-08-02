@@ -75,6 +75,7 @@ TELEGRAM_PUBLIC_CHANNEL_LINK: Final[str] = _env(
 TELEGRAM_WEB_DASHBOARD: Final[str] = _env(
     "BEEHIVE_WEB_DASHBOARD", "https://NUTTYX4.github.io/Smart-Beehive-Monitoring-and-Alert-System/"
 )
+TELEGRAM_API_BASE: Final[str] = _env("BEEHIVE_TG_BASE_URL", "https://api.telegram.org").rstrip("/")
 TELEGRAM_READ_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_READ_TIMEOUT", 30)
 TELEGRAM_CONNECT_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_CONNECT_TIMEOUT", 20)
 TELEGRAM_POLL_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_POLL_TIMEOUT", 60)

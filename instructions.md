@@ -292,5 +292,52 @@ All acoustic classifications, temperatures, weights, and motion deltas are logge
 
 * **`arecord -l` shows no microphone**: Confirm `/boot/firmware/config.txt` has `dtoverlay=googlevoicehat-soundcard` and reboot.
 * **Dominant frequency returns `0.00 Hz` during testing**: Verify `BEEHIVE_FFT_NOISE_GATE=0.01` is set in your systemd override. If testing quiet synthetic sounds, lower it temporarily to `0.0001`.
-* **Telegram sendMessage 400 Bad Request ("can't parse entities")**: The automated plain-text fallback in `tgbot/alerts.py` will catch this and send the text without Markdown styling. Ensure your bot is running Version 2 codebase or newer.
 * **PortAudio / Sounddevice library not found**: Re-run `sudo apt-get install portaudio19-dev libportaudio2 libasound2-dev`.
+* **Telegram Bot unresponsive on College / University WiFi**: Many campus enterprise firewalls restrict access to `api.telegram.org`. Follow Section 16 below to route all bot communications through an unblocked Cloudflare reverse proxy.
+
+---
+
+## 16. University Campus & Expo WiFi Firewall Bypass (Cloudflare Workers)
+
+When demonstrating your Raspberry Pi on college campus WiFi or tech competition networks (e.g., NASSCOM, IEEE Expositions), institutional firewalls frequently block Telegram domains (`api.telegram.org`). To guarantee continuous, zero-delay operation across all networks (home WiFi, cellular hotspots, and restricted university firewalls) without modifying any software on the Raspberry Pi, the system natively supports routing through a **Cloudflare Worker Reverse Proxy**.
+
+### 1-Minute Cloudflare Worker Setup:
+1. Log in to your free [Cloudflare Dashboard](https://dash.cloudflare.com/) and go to **Workers & Pages** -> **Create Application** -> **Create Worker**.
+2. Give your worker a clean name (e.g., `hive-proxy` or `smart-beehive`) and click **Deploy**.
+3. Click **Edit Code** and replace the existing script with the following 12 lines of enterprise-grade Reverse Proxy logic:
+
+```javascript
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    url.hostname = "api.telegram.org";
+    const newRequest = new Request(url, request);
+    return fetch(newRequest);
+  },
+};
+```
+
+4. Click **Save and Deploy**. Your Worker will generate an SSL-secured URL, such as: `https://hive-proxy.yourname.workers.dev`.
+
+### Configuring Your Raspberry Pi for Unified Bypass:
+Add your Cloudflare Worker URL to your systemd override configuration file:
+
+```bash
+sudo nano /etc/systemd/system/beehive.service.d/override.conf
+```
+
+Add the following environment line under `[Service]`:
+```ini
+Environment=BEEHIVE_TG_BASE_URL=https://hive-proxy.yourname.workers.dev
+```
+
+Reload and restart the service:
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart beehive.service
+```
+
+### Architectural Advantages of Unified Cloudflare Routing:
+* **Permanent Unified Operation**: You can leave this configuration enabled permanently. Because Cloudflare's tier-1 global edge network fiber routes traffic directly to Telegram, response latency on home WiFi and mobile hotspots is often faster than direct connections.
+* **Zero CPU / Encryption Overhead**: No VPN software, openVPN tunnels, or TOR proxy daemons are needed on the Raspberry Pi.
+* **Firewall Invisible**: College firewall systems treat `*.workers.dev` traffic as standard academic cloud CDN communication, completely immunizing your demonstration from firewall blocks.
+* **Resilient Internet Check**: The system's network health verification probes `www.google.com` rather than Telegram directly, preventing false offline alarms under campus firewall restrictions.

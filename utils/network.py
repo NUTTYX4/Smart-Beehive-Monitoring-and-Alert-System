@@ -94,8 +94,8 @@ def retry_with_backoff(
     return decorator
 
 
-def is_internet_reachable(host: str = "https://api.telegram.org", timeout: float = 5.0) -> bool:
-    """Best-effort connectivity probe used after boot / outages."""
+def is_internet_reachable(host: str = "https://www.google.com", timeout: float = 5.0) -> bool:
+    """Best-effort connectivity probe resistant to campus Telegram domain restrictions."""
     try:
         requests.head(host, timeout=timeout, verify=certifi.where())
         return True

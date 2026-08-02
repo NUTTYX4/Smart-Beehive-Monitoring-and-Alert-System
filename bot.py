@@ -36,6 +36,7 @@ from telegram.ext import (
 
 from config import (
     MEMBERS_FILE,
+    TELEGRAM_API_BASE,
     TELEGRAM_AUTHORIZED_USER_ID,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CONNECT_TIMEOUT,
@@ -124,6 +125,8 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .base_url(f"{TELEGRAM_API_BASE}/bot")
+        .base_file_url(f"{TELEGRAM_API_BASE}/file/bot")
         .read_timeout(TELEGRAM_READ_TIMEOUT)
         .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
         .build()
