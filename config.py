@@ -99,19 +99,19 @@ MPU6050_I2C_BUS: Final[int] = _env_int("BEEHIVE_MPU_I2C_BUS", 1)
 MPU6050_ADDR: Final[int] = _env_int("BEEHIVE_MPU_ADDR", 0x68)
 
 # INMP441 I2S MEMS microphone (native Raspberry Pi I2S, via sounddevice)
-INMP441_SAMPLE_RATE: Final[int] = _env_int("BEEHIVE_MIC_SAMPLE_RATE", 44100)
-INMP441_CHANNELS: Final[int] = _env_int("BEEHIVE_MIC_CHANNELS", 1)
-INMP441_DEVICE: Final[str] = _env("BEEHIVE_MIC_DEVICE", "")  # "" = sounddevice default
+INMP441_SAMPLE_RATE: Final[int] = _env_int("BEEHIVE_MIC_SAMPLE_RATE", 48000)
+INMP441_CHANNELS: Final[int] = _env_int("BEEHIVE_MIC_CHANNELS", 2)
+INMP441_DEVICE: Final[str] = _env("BEEHIVE_MIC_DEVICE", "snd_rpi_googlevoicehat_soundcar")
 INMP441_BLOCK_SIZE: Final[int] = _env_int("BEEHIVE_MIC_BLOCK_SIZE", 4096)
 INMP441_CAPTURE_SECONDS: Final[float] = _env_float("BEEHIVE_MIC_CAPTURE_SECONDS", 2.0)
-INMP441_DTYPE: Final[str] = _env("BEEHIVE_MIC_DTYPE", "int32")
+INMP441_DTYPE: Final[str] = _env("BEEHIVE_MIC_DTYPE", "float32")
 
 # -------------------------------------------------------------------
 # Acoustic analysis
 # -------------------------------------------------------------------
 FFT_BAND_LOW_HZ: Final[float] = _env_float("BEEHIVE_FFT_LOW", 100.0)
 FFT_BAND_HIGH_HZ: Final[float] = _env_float("BEEHIVE_FFT_HIGH", 800.0)
-FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 15.0)
+FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 0.01)
 
 # -------------------------------------------------------------------
 # Alert thresholds

@@ -113,8 +113,8 @@ class Inmp441Capture:
                 raise MicrophoneUnavailableError(f"INMP441 capture failed: {exc}") from exc
 
         audio = np.asarray(recording, dtype=np.float64)
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)  # downmix to mono
+        if audio.ndim > 1 and audio.shape[1] >= 1:
+            audio = audio[:, 0]  # Isolate active Left channel from INMP441 I2S stream
 
         # Normalize by dtype's full-scale range so gain is consistent
         # regardless of the configured sample format.

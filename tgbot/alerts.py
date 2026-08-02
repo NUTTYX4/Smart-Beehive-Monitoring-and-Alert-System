@@ -167,12 +167,19 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
 # of its own -- it talks to the Bot API directly over HTTPS so it does
 # not depend on python-telegram-bot's async Updater/Application).
 # ----------------------------------------------------------------------
-def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+def send_message(chat_id: str, text: str, parse_mode: Optional[str] = "Markdown") -> bool:
     """Send a message via raw Bot API HTTPS call with retry/backoff."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = _session.post(url, data=payload, timeout=10)
+        if resp.status_code == 400 and parse_mode is not None:
+            # Fallback to plaintext if Markdown entity parsing fails (e.g. usernames with underscores)
+            logger.warning("Markdown syntax error in Telegram message, retrying as raw text...")
+            payload.pop("parse_mode", None)
+            resp = _session.post(url, data=payload, timeout=10)
         if resp.status_code != 200:
             logger.warning("Telegram sendMessage non-200: %s %s", resp.status_code, resp.text[:200])
             return False
