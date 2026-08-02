@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 CALLBACK_PATTERN = (
     "^(start_init_member|stop_script_member|status_check|change_calibration|"
     "download_data_csv|check_pi_health|system_info|uptime_info|"
-    "sensor_readings|main_menu)$"
+    "sensor_readings|main_menu|request_admin_access|approve_.*|deny_.*)$"
 )
 
 
@@ -135,6 +135,15 @@ def build_application() -> Application:
     )
     application.add_handler(
         CommandHandler("set_ratio", commands.set_ratio, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("addadmin", commands.addadmin, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("deladmin", commands.deladmin, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("admins", commands.list_admins, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(CallbackQueryHandler(commands.manage_script, pattern=CALLBACK_PATTERN))
     application.add_handler(

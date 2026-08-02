@@ -87,6 +87,10 @@ def is_member(user_id: int) -> bool:
     return str(user_id) in load_members()
 
 
+def is_approved(user_id: int) -> bool:
+    return user_id == TELEGRAM_AUTHORIZED_USER_ID or is_member(user_id)
+
+
 def _actor(update: Update):
     if update.effective_user:
         return update.effective_user
@@ -99,11 +103,11 @@ def restricted_admin(func: Callable) -> Callable:
         user = _actor(update)
         if user is None:
             return
-        if user.id != TELEGRAM_AUTHORIZED_USER_ID:
+        if not is_approved(user.id):
             if update.message:
-                await update.message.reply_text("🛑 Admin only access.")
+                await update.message.reply_text("🛑 Approved Admin access only.")
             elif update.callback_query:
-                await update.callback_query.answer("🛑 Admin only access.", show_alert=True)
+                await update.callback_query.answer("🛑 Approved Admin access only.", show_alert=True)
             return
         return await func(update, context, *a, **kw)
 
@@ -116,12 +120,12 @@ def member_required(func: Callable) -> Callable:
         user = _actor(update)
         if user is None:
             return
-        if user.id != TELEGRAM_AUTHORIZED_USER_ID and not is_member(user.id):
+        if not is_approved(user.id):
             if update.message:
-                await update.message.reply_text("🛑 Access Denied. Only approved members can send commands.")
+                await update.message.reply_text("🛑 Access Denied. Approved Admin access required for controls.")
             elif update.callback_query:
                 await update.callback_query.answer(
-                    "🛑 Access Denied. Only approved members can send commands.", show_alert=True
+                    "🛑 Access Denied. Approved Admin access required for controls.", show_alert=True
                 )
             return
         return await func(update, context, *a, **kw)
@@ -163,17 +167,27 @@ def _stop_monitor() -> None:
 
 
 # ----------------------------------------------------------------------
-# /start and main menu
+# /start and main menu (Public + Admin modes)
 # ----------------------------------------------------------------------
-@member_required
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = _actor(update)
+    if user is None or not update.message:
+        return
     context.user_data["awaiting_calibration"] = False
     context.user_data["awaiting_calibration_change"] = False
-    await update.message.reply_text(
-        "*Member Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
-        reply_markup=keyboards.main_menu(_is_running()),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+
+    if is_approved(user.id):
+        await update.message.reply_text(
+            "*👑 Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+            reply_markup=keyboards.main_menu(_is_running()),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(
+            "*🐝 Smart Hive Monitor — Public Access*\n\nYou have read-only guest access to check live sensor readings and our IoT web dashboard.\nTo unlock full system control and calibration capabilities, tap *Request Admin Access* below.",
+            reply_markup=keyboards.guest_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
 @restricted_admin
@@ -269,9 +283,10 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     restricted_actions = {
         "start_init_member", "stop_script_member", "change_calibration",
+        "check_pi_health", "system_info", "uptime_info", "download_data_csv",
     }
-    if action in restricted_actions and uid != TELEGRAM_AUTHORIZED_USER_ID and not is_member(uid):
-        await query.answer("🛑 Access Denied.", show_alert=True)
+    if action in restricted_actions and not is_approved(uid):
+        await query.answer("🛑 Access Denied. Approved Admin status required.", show_alert=True)
         return
 
     if action == "start_init_member":
@@ -304,11 +319,67 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN,
         )
     elif action == "main_menu":
-        await query.edit_message_text(
-            "*Member Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
-            reply_markup=keyboards.main_menu(_is_running()),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        if is_approved(uid):
+            await query.edit_message_text(
+                "*👑 Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+                reply_markup=keyboards.main_menu(_is_running()),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await query.edit_message_text(
+                "*🐝 Smart Hive Monitor — Public Access*\n\nYou have read-only guest access to check live sensor readings and our IoT web dashboard.\nTo unlock full system control and calibration capabilities, tap *Request Admin Access* below.",
+                reply_markup=keyboards.guest_menu(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    elif action == "request_admin_access":
+        if is_approved(uid):
+            await query.answer("✅ You are already an Approved Admin!", show_alert=True)
+            return
+        user_name = f"{query.from_user.full_name} (@{query.from_user.username or uid})"
+        await query.answer("📩 Your request has been forwarded to the Root Admin!", show_alert=True)
+        try:
+            await context.bot.send_message(
+                chat_id=TELEGRAM_AUTHORIZED_USER_ID,
+                text=f"🔔 *New Admin Access Request*\n\nUser: `{user_name}`\nID: `{uid}`\n\nApprove to grant full system control capabilities?",
+                reply_markup=keyboards.admin_approval_keyboard(uid, user_name),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.error("Failed to forward access request to admin: %s", exc)
+    elif action.startswith("approve_") or action.startswith("deny_"):
+        if uid != TELEGRAM_AUTHORIZED_USER_ID and not is_member(uid):
+            await query.answer("🛑 Only admins can approve or deny requests.", show_alert=True)
+            return
+        parts = action.split("_", 2)
+        cmd_type = parts[0]
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            return
+        if cmd_type == "approve":
+            target_name = parts[2] if len(parts) > 2 else f"User {target_id}"
+            members = load_members()
+            members[str(target_id)] = target_name
+            save_members(members)
+            await query.edit_message_text(f"✅ *Approved Admin Access for {target_name} (`{target_id}`)*", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text="🎉 *Your Admin Access has been APPROVED!*\n\nYou now have full administrative command center capabilities. Type /start to open your admin control panel.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception as exc:
+                logger.warning("Could not send approval confirmation to %s: %s", target_id, exc)
+        elif cmd_type == "deny":
+            await query.edit_message_text(f"❌ *Denied Admin Access for ID `{target_id}`*", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text="❌ *Your request for Admin Access was declined.*",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
 
 
 async def _handle_start_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -521,4 +592,55 @@ async def set_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
     logger.info("Scale ratio set to %.6f by %s", new_ratio, user_name)
+
+
+# ----------------------------------------------------------------------
+# Admin User Management (/addadmin, /deladmin, /admins)
+# ----------------------------------------------------------------------
+@restricted_admin
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/addadmin <user_id> [name] — manually promote a user to full Admin."""
+    if not update.message or not context.args:
+        await update.message.reply_text("Usage: `/addadmin <user_id> [optional_name]`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid_str = context.args[0]
+    if not uid_str.isdigit():
+        await update.message.reply_text("❌ User ID must be digits.")
+        return
+    name = " ".join(context.args[1:]) if len(context.args) > 1 else f"Admin {uid_str}"
+    members = load_members()
+    members[uid_str] = name
+    save_members(members)
+    await update.message.reply_text(f"✅ User `{uid_str}` ({name}) added to Approved Admins.", parse_mode=ParseMode.MARKDOWN)
+
+
+@restricted_admin
+async def deladmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/deladmin <user_id> — revoke admin rights."""
+    if not update.message or not context.args:
+        await update.message.reply_text("Usage: `/deladmin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid_str = context.args[0]
+    members = load_members()
+    if uid_str in members:
+        removed = members.pop(uid_str)
+        save_members(members)
+        await update.message.reply_text(f"🗑️ Revoked Admin access from `{uid_str}` ({removed}).", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("ℹ️ That User ID is not currently in the approved list.")
+
+
+@restricted_admin
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/admins — display list of approved admin members."""
+    if not update.message:
+        return
+    members = load_members()
+    lines = [f"👑 *Root Admin ID:* `{TELEGRAM_AUTHORIZED_USER_ID}`", "\n*Approved Admin Members:*"]
+    if not members:
+        lines.append("_No additional admins approved yet._")
+    else:
+        for uid, name in members.items():
+            lines.append(f"• `{uid}`: {name}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
