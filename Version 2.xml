@@ -32,7 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: Version 1 .xml, repomix-output.xml, Version 2.xml
+- Files matching these patterns are excluded: Version*.xml
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -47,13 +47,14 @@ ai_module/
     Triggered.wav
   __init__.py
   ai_engine.py
-  requirements_ai.txt
   train_model.py
 audio/
   __init__.py
   capture.py
   fft.py
   filters.py
+frontend/
+  index.html
 sensors/
   __init__.py
   dht22_sensor.py
@@ -86,8 +87,8 @@ utils/
 bot.py
 config.py
 enable_i2s.sh
+index.html
 install.sh
-instructions_ai.md
 instructions.md
 monitor.py
 README.md
@@ -112,530 +113,8 @@ Deleting this directory cleanly reverts the system to legacy FFT mode.
 """
 </file>
 
-<file path="ai_module/ai_engine.py">
-# -*- coding: utf-8 -*-
-"""
-ai_module/ai_engine.py
-=======================
-Edge AI acoustic inference engine for the BeeHive Monitor.
-
-Loads a TensorFlow Lite model (``bee_acoustic_model.tflite``) and
-classifies a raw audio buffer as **Normal** or **Triggered / Panic**
-using 40 Mel-Frequency Cepstral Coefficients (MFCCs) extracted after
-a 100–800 Hz SciPy bandpass filter.
-
-Falls back gracefully when the model file or TFLite runtime is absent,
-allowing the caller (``Inmp441Sensor``) to revert to the legacy FFT
-peak-frequency analyser transparently.
-"""
-
-from __future__ import annotations
-
-import logging
-from pathlib import Path
-from typing import Optional
-
-import numpy as np
-from scipy.signal import butter, sosfilt
-
-from config import (
-    AI_CONFIDENCE_THRESHOLD,
-    AI_MFCC_COEFFICIENTS,
-    AI_MODEL_PATH,
-    FFT_BAND_HIGH_HZ,
-    FFT_BAND_LOW_HZ,
-    FFT_NOISE_GATE,
-)
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# TFLite runtime import — prefer the lightweight ``tflite_runtime`` package
-# (recommended on Raspberry Pi) but accept the full TensorFlow fallback.
-# ---------------------------------------------------------------------------
-_Interpreter = None  # type: ignore[assignment]
-try:
-    from tflite_runtime.interpreter import Interpreter as _Interpreter  # type: ignore[no-redef]
-except ImportError:
-    try:
-        from tensorflow.lite import Interpreter as _Interpreter  # type: ignore[no-redef]
-    except ImportError:
-        pass
-
-# ---------------------------------------------------------------------------
-# Librosa import (for MFCC extraction)
-# ---------------------------------------------------------------------------
-try:
-    import librosa  # type: ignore[import-untyped]
-except ImportError:
-    librosa = None  # type: ignore[assignment]
-
-
-# ======================================================================
-# Bandpass filter utility
-# ======================================================================
-def bandpass_filter(
-    samples: np.ndarray,
-    sample_rate: float,
-    low_hz: float = FFT_BAND_LOW_HZ,
-    high_hz: float = FFT_BAND_HIGH_HZ,
-    order: int = 5,
-) -> np.ndarray:
-    """Apply a Butterworth bandpass filter to isolate bee acoustics."""
-    nyquist = sample_rate / 2.0
-    low = max(low_hz / nyquist, 1e-5)
-    high = min(high_hz / nyquist, 1.0 - 1e-5)
-    sos = butter(order, [low, high], btype="band", output="sos")
-    return sosfilt(sos, samples).astype(np.float32)
-
-
-# ======================================================================
-# MFCC extraction utility
-# ======================================================================
-def extract_mfcc(
-    samples: np.ndarray,
-    sample_rate: float,
-    n_mfcc: int = AI_MFCC_COEFFICIENTS,
-) -> np.ndarray:
-    """Compute mean MFCCs across time for a mono audio buffer.
-
-    Returns a 1-D array of shape ``(n_mfcc,)``.
-    """
-    if librosa is None:
-        raise RuntimeError("librosa is not installed — cannot extract MFCCs")
-
-    audio = samples.astype(np.float32)
-    mfccs = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=n_mfcc)
-    return np.mean(mfccs, axis=1).astype(np.float32)  # (n_mfcc,)
-
-
-# ======================================================================
-# AIAcousticEngine
-# ======================================================================
-class AIAcousticEngine:
-    """TFLite inference wrapper for bee acoustic classification.
-
-    If the model file is missing, or the TFLite runtime / librosa are
-    not installed, construction succeeds but ``available`` is ``False``
-    and every call to ``predict_acoustic_state`` will raise
-    ``RuntimeError`` so the caller can fall back to legacy FFT.
-    """
-
-    def __init__(self, model_path: Optional[Path] = None) -> None:
-        self._model_path = Path(model_path or AI_MODEL_PATH)
-        self._interpreter = None
-        self._input_details = None
-        self._output_details = None
-        self.available = False
-
-        if _Interpreter is None:
-            logger.warning("TFLite runtime not installed — AI engine disabled")
-            return
-        if librosa is None:
-            logger.warning("librosa not installed — AI engine disabled")
-            return
-        if not self._model_path.is_file():
-            logger.warning(
-                "AI model not found at %s — AI engine disabled (FFT fallback active)",
-                self._model_path,
-            )
-            return
-
-        try:
-            self._interpreter = _Interpreter(model_path=str(self._model_path))
-            self._interpreter.allocate_tensors()
-            self._input_details = self._interpreter.get_input_details()
-            self._output_details = self._interpreter.get_output_details()
-            self.available = True
-            logger.info("AI acoustic engine loaded: %s", self._model_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load AI model: %s", exc)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-    def predict_acoustic_state(
-        self,
-        samples: np.ndarray,
-        sample_rate: float,
-    ) -> dict:
-        """Classify an audio buffer.
-
-        Returns a dict with keys:
-            ``behavior``   – human-readable status label
-            ``confidence`` – float in [0, 1]
-            ``is_silent``  – True when the buffer is below the noise gate
-        """
-        if not self.available:
-            raise RuntimeError("AI engine is not available")
-
-        # ---- Noise gate (same threshold used by the FFT analyser) ----
-        peak = float(np.max(np.abs(samples)))
-        if peak < FFT_NOISE_GATE:
-            return {"behavior": "Silence", "confidence": 1.0, "is_silent": True}
-
-        # ---- Pre-processing ------------------------------------------
-        filtered = bandpass_filter(samples, sample_rate)
-        mfcc_features = extract_mfcc(filtered, sample_rate)
-        input_data = mfcc_features.reshape(1, -1).astype(np.float32)
-
-        # ---- TFLite inference ----------------------------------------
-        self._interpreter.set_tensor(self._input_details[0]["index"], input_data)
-        self._interpreter.invoke()
-        prediction = float(
-            self._interpreter.get_tensor(self._output_details[0]["index"])[0][0]
-        )
-
-        # ---- Decision ------------------------------------------------
-        if prediction > AI_CONFIDENCE_THRESHOLD:
-            return {
-                "behavior": "⚔️ Triggered / Panic",
-                "confidence": prediction,
-                "is_silent": False,
-            }
-        return {
-            "behavior": "🟢 Normal / Active",
-            "confidence": 1.0 - prediction,
-            "is_silent": False,
-        }
-</file>
-
-<file path="ai_module/requirements_ai.txt">
-# AI Module Dependencies
-# =======================
-# These are NOT part of the main requirements.txt to keep the Pi
-# install lean.  Install selectively depending on your platform.
-
-# ------ Training (PC only) ------
-tensorflow>=2.15
-librosa>=0.10
-scipy>=1.11
-
-# ------ Inference (Raspberry Pi) ------
-# Install ONE of these on the Pi:
-#   pip install tflite-runtime
-# OR if you already have full TensorFlow installed, it works too.
-# tflite-runtime>=2.14
-
-# librosa is also needed on the Pi for MFCC extraction:
-# librosa>=0.10
-</file>
-
-<file path="ai_module/train_model.py">
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ai_module/train_model.py
-=========================
-Standalone training script — run on a **PC** (not on the Pi) to produce
-``bee_acoustic_model.tflite`` from clean demonstration WAV files.
-
-Usage::
-
-    python ai_module/train_model.py \\
-        --normal  path/to/Normal.wav \\
-        --triggered path/to/Triggered.wav \\
-        [--epochs 50] [--output ai_module/bee_acoustic_model.tflite]
-
-The script:
-1. Slices each WAV into 2.0-second chunks.
-2. Applies a 100–800 Hz Butterworth bandpass filter.
-3. Extracts 40 mean MFCCs per chunk.
-4. Trains a lightweight Keras Sequential classifier.
-5. Exports the frozen model to TensorFlow Lite.
-"""
-
-from __future__ import annotations
-
-import argparse
-import sys
-from pathlib import Path
-
-import numpy as np
-from scipy.signal import butter, sosfilt
-
-# ---------------------------------------------------------------------------
-# Constants (mirror config.py values so the training script is self-contained)
-# ---------------------------------------------------------------------------
-SAMPLE_RATE = 44_100
-CHUNK_SECONDS = 2.0
-BAND_LOW_HZ = 100.0
-BAND_HIGH_HZ = 800.0
-N_MFCC = 40
-FILTER_ORDER = 5
-
-# ---------------------------------------------------------------------------
-# Audio helpers
-# ---------------------------------------------------------------------------
-
-def _bandpass(samples: np.ndarray, sr: float) -> np.ndarray:
-    nyquist = sr / 2.0
-    low = max(BAND_LOW_HZ / nyquist, 1e-5)
-    high = min(BAND_HIGH_HZ / nyquist, 1.0 - 1e-5)
-    sos = butter(FILTER_ORDER, [low, high], btype="band", output="sos")
-    return sosfilt(sos, samples).astype(np.float32)
-
-
-def _extract_mfcc(samples: np.ndarray, sr: float) -> np.ndarray:
-    import librosa  # type: ignore[import-untyped]
-    mfccs = librosa.feature.mfcc(y=samples.astype(np.float32), sr=sr, n_mfcc=N_MFCC)
-    return np.mean(mfccs, axis=1).astype(np.float32)
-
-
-def load_and_slice(
-    wav_path: str | Path, label: int, chunk_s: float = CHUNK_SECONDS, sr: int = SAMPLE_RATE
-) -> list[tuple[np.ndarray, int]]:
-    """Load a WAV file, slice into ``chunk_s``-second windows, bandpass
-    filter, extract MFCCs, and return a list of ``(features, label)``."""
-    import librosa  # type: ignore[import-untyped]
-
-    audio, actual_sr = librosa.load(str(wav_path), sr=sr, mono=True)
-    chunk_samples = int(chunk_s * actual_sr)
-    results: list[tuple[np.ndarray, int]] = []
-
-    for start in range(0, len(audio) - chunk_samples + 1, chunk_samples):
-        chunk = audio[start : start + chunk_samples]
-        filtered = _bandpass(chunk, actual_sr)
-        mfcc_feat = _extract_mfcc(filtered, actual_sr)
-        results.append((mfcc_feat, label))
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Model definition & training
-# ---------------------------------------------------------------------------
-
-def build_model(input_dim: int = N_MFCC):
-    """Build a lightweight Keras Sequential classifier."""
-    import tensorflow as tf  # type: ignore[import-untyped]
-
-    model = tf.keras.Sequential([
-        tf.keras.layers.Dense(32, activation="relu", input_shape=(input_dim,)),
-        tf.keras.layers.Dropout(0.2),
-        tf.keras.layers.Dense(16, activation="relu"),
-        tf.keras.layers.Dense(1, activation="sigmoid"),
-    ])
-    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-    return model
-
-
-def train_and_export(
-    normal_wav: str | Path,
-    triggered_wav: str | Path,
-    output_path: str | Path,
-    epochs: int = 50,
-) -> None:
-    import tensorflow as tf  # type: ignore[import-untyped]
-
-    print(f"Loading Normal WAV:    {normal_wav}")
-    normal_data = load_and_slice(normal_wav, label=0)
-    print(f"  → {len(normal_data)} chunks")
-
-    print(f"Loading Triggered WAV: {triggered_wav}")
-    triggered_data = load_and_slice(triggered_wav, label=1)
-    print(f"  → {len(triggered_data)} chunks")
-
-    all_data = normal_data + triggered_data
-    if len(all_data) < 4:
-        print("ERROR: Not enough audio chunks for training. Provide longer WAV files.")
-        sys.exit(1)
-
-    np.random.shuffle(all_data)
-    X = np.array([d[0] for d in all_data], dtype=np.float32)
-    y = np.array([d[1] for d in all_data], dtype=np.float32)
-
-    print(f"\nDataset: {len(X)} samples ({int(np.sum(y == 0))} normal, {int(np.sum(y == 1))} triggered)")
-
-    model = build_model(input_dim=X.shape[1])
-    model.summary()
-
-    history = model.fit(X, y, epochs=epochs, batch_size=8, validation_split=0.2, verbose=1)
-
-    final_acc = history.history["accuracy"][-1]
-    print(f"\nFinal training accuracy: {final_acc:.2%}")
-
-    # ---- Export to TFLite ----
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    tflite_model = converter.convert()
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(tflite_model)
-    print(f"\n✅ TFLite model exported to: {output_path}")
-    print(f"   Size: {output_path.stat().st_size / 1024:.1f} KB")
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    _script_dir = Path(__file__).resolve().parent
-    _default_normal = str(_script_dir / "audio_samples" / "Normal.wav")
-    _default_triggered = str(_script_dir / "audio_samples" / "Triggered.wav")
-
-    parser = argparse.ArgumentParser(
-        description="Train bee acoustic classifier and export to TFLite."
-    )
-    parser.add_argument("--normal", default=_default_normal, help="Path to Normal.wav (label 0)")
-    parser.add_argument("--triggered", default=_default_triggered, help="Path to Triggered.wav (label 1)")
-    parser.add_argument("--epochs", type=int, default=50, help="Training epochs (default: 50)")
-    parser.add_argument(
-        "--output",
-        default=str(_script_dir / "bee_acoustic_model.tflite"),
-        help="Output .tflite path",
-    )
-    args = parser.parse_args()
-
-    for path_arg, name in [(args.normal, "Normal"), (args.triggered, "Triggered")]:
-        if not Path(path_arg).is_file():
-            print(f"ERROR: {name} WAV file not found: {path_arg}")
-            sys.exit(1)
-
-    train_and_export(args.normal, args.triggered, args.output, args.epochs)
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
 <file path="audio/__init__.py">
 """Audio subpackage: I2S capture, filtering, and FFT analysis for the INMP441 microphone."""
-</file>
-
-<file path="audio/capture.py">
-# -*- coding: utf-8 -*-
-"""
-audio/capture.py
-=================
-Continuous audio capture from the INMP441 I2S MEMS microphone via the
-Raspberry Pi's native I2S peripheral, exposed to Python through
-`sounddevice` (PortAudio). No SPI/ADC hardware (MCP3008, TL072,
-ADS1115) is involved -- the INMP441 outputs digital I2S data directly.
-
-Requires `enable_i2s.sh` to have configured `dtoverlay=googlevoicehat-soundcard`
-(or an equivalent I2S microphone overlay) in `/boot/firmware/config.txt`
-and the device to appear in `arecord -l` / `sounddevice.query_devices()`.
-"""
-
-from __future__ import annotations
-
-import threading
-from typing import Optional
-
-import numpy as np
-
-try:
-    import sounddevice as sd
-except (ImportError, OSError) as exc:
-    # ImportError: the `sounddevice` package itself isn't installed.
-    # OSError: the package is installed but PortAudio's shared library
-    # is missing/unreachable on this system.
-    sd = None  # type: ignore[assignment]
-    _IMPORT_ERROR: Optional[Exception] = exc
-else:
-    _IMPORT_ERROR = None
-
-from config import (
-    INMP441_BLOCK_SIZE,
-    INMP441_CAPTURE_SECONDS,
-    INMP441_CHANNELS,
-    INMP441_DEVICE,
-    INMP441_DTYPE,
-    INMP441_SAMPLE_RATE,
-)
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-
-class MicrophoneUnavailableError(RuntimeError):
-    """Raised when the INMP441 / I2S audio backend cannot be reached."""
-
-
-class Inmp441Capture:
-    """Thread-safe wrapper around a `sounddevice` input stream for the
-    INMP441 I2S microphone, providing simple blocking captures that the
-    monitor loop can call once per cycle without managing PortAudio
-    state itself."""
-
-    def __init__(
-        self,
-        sample_rate: int = INMP441_SAMPLE_RATE,
-        channels: int = INMP441_CHANNELS,
-        device: str = INMP441_DEVICE,
-        dtype: str = INMP441_DTYPE,
-        block_size: int = INMP441_BLOCK_SIZE,
-    ) -> None:
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.device = device or None
-        self.dtype = dtype
-        self.block_size = block_size
-        self._lock = threading.Lock()
-        self._last_error: Optional[str] = None
-
-    def _ensure_backend(self) -> None:
-        if sd is None:
-            raise MicrophoneUnavailableError(
-                f"sounddevice/PortAudio unavailable: {_IMPORT_ERROR}"
-            )
-
-    def is_available(self) -> bool:
-        """Best-effort check that the I2S microphone can be opened."""
-        try:
-            self._ensure_backend()
-            with self._lock:
-                sd.check_input_settings(
-                    device=self.device,
-                    channels=self.channels,
-                    samplerate=self.sample_rate,
-                    dtype=self.dtype,
-                )
-            return True
-        except Exception as exc:  # noqa: BLE001
-            self._last_error = str(exc)
-            logger.warning("INMP441 microphone unavailable: %s", exc)
-            return False
-
-    def capture(self, duration_s: float = INMP441_CAPTURE_SECONDS) -> np.ndarray:
-        """Blocking capture of `duration_s` seconds of mono float64 audio,
-        normalized to roughly [-1, 1]. Raises MicrophoneUnavailableError
-        on failure so callers can decide how to degrade gracefully."""
-        self._ensure_backend()
-        frames = int(duration_s * self.sample_rate)
-        with self._lock:
-            try:
-                recording = sd.rec(
-                    frames,
-                    samplerate=self.sample_rate,
-                    channels=self.channels,
-                    dtype=self.dtype,
-                    device=self.device,
-                    blocking=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = str(exc)
-                raise MicrophoneUnavailableError(f"INMP441 capture failed: {exc}") from exc
-
-        audio = np.asarray(recording, dtype=np.float64)
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)  # downmix to mono
-
-        # Normalize by dtype's full-scale range so gain is consistent
-        # regardless of the configured sample format.
-        if self.dtype == "int32":
-            audio /= float(2**31)
-        elif self.dtype == "int16":
-            audio /= float(2**15)
-        # float32/float64 streams are already roughly in [-1, 1].
-
-        return audio
-
-    @property
-    def last_error(self) -> Optional[str]:
-        return self._last_error
 </file>
 
 <file path="audio/fft.py">
@@ -1461,49 +940,6 @@ collision entirely.
 """
 </file>
 
-<file path="tgbot/keyboards.py">
-# -*- coding: utf-8 -*-
-"""
-tgbot/keyboards.py
-====================
-Inline keyboard layouts for the BeeHive Monitor Telegram bot.
-"""
-
-from __future__ import annotations
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-from config import TELEGRAM_PUBLIC_CHANNEL_LINK
-
-
-def main_menu(is_running: bool) -> InlineKeyboardMarkup:
-    """Primary member command center keyboard."""
-    status_icon = "🟢" if is_running else "🔴"
-    keyboard = [
-        [InlineKeyboardButton(f"{status_icon} Start Hive Monitor", callback_data="start_init_member")],
-        [InlineKeyboardButton("🛑 Stop Monitor", callback_data="stop_script_member")],
-        [InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration")],
-        [
-            InlineKeyboardButton("📄 Check Status", callback_data="status_check"),
-            InlineKeyboardButton("🔗 Join Channel", url=TELEGRAM_PUBLIC_CHANNEL_LINK),
-        ],
-        [
-            InlineKeyboardButton("📊 Hive Data (CSV)", callback_data="download_data_csv"),
-            InlineKeyboardButton("⚙️ Pi Health", callback_data="check_pi_health"),
-        ],
-        [
-            InlineKeyboardButton("🖥️ System Info", callback_data="system_info"),
-            InlineKeyboardButton("⏱️ Uptime", callback_data="uptime_info"),
-        ],
-        [InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def back_to_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="main_menu")]])
-</file>
-
 <file path="utils/__init__.py">
 """Utility subpackage: logging, calibration, CSV, ThingSpeak, network, watchdog."""
 </file>
@@ -1736,124 +1172,6 @@ def get_logger(name: str) -> logging.Logger:
     """Return a module-level logger, configuring the root logger once."""
     _configure_root()
     return logging.getLogger(name)
-</file>
-
-<file path="utils/network.py">
-# -*- coding: utf-8 -*-
-"""
-utils/network.py
-=================
-Network hardening helpers: a pre-configured `requests.Session` with
-retry/backoff for transient failures (used by ThingSpeak and Telegram
-helpers), plus a generic retry decorator for arbitrary callables such
-as sensor reads that talk to hardware over I2C/SPI-like buses.
-"""
-
-from __future__ import annotations
-
-import functools
-import time
-from typing import Any, Callable, TypeVar
-
-import certifi
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-from config import NETWORK_BACKOFF_BASE, NETWORK_BACKOFF_MAX, NETWORK_MAX_RETRIES
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-T = TypeVar("T")
-
-
-def build_http_session(
-    total: int = NETWORK_MAX_RETRIES, backoff: float = NETWORK_BACKOFF_BASE
-) -> requests.Session:
-    """Return a `requests.Session` configured with retry/backoff and a
-    trusted CA bundle, used for all outbound HTTP calls (ThingSpeak,
-    Telegram REST fallback, etc.)."""
-    retry = Retry(
-        total=total,
-        connect=total,
-        read=total,
-        backoff_factor=backoff,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.verify = certifi.where()
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-def retry_with_backoff(
-    max_attempts: int = NETWORK_MAX_RETRIES,
-    base_delay: float = NETWORK_BACKOFF_BASE,
-    max_delay: float = NETWORK_BACKOFF_MAX,
-    exceptions: tuple = (Exception,),
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator: retry a function call with exponential backoff.
-
-    Never raises after exhausting attempts when `default` is supplied
-    via functools.partial-style wrapping is not needed here -- callers
-    that want graceful degradation should catch the final exception.
-    """
-
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> T:
-            attempt = 0
-            delay = base_delay
-            last_exc: Exception | None = None
-            while attempt < max_attempts:
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as exc:  # noqa: BLE001
-                    last_exc = exc
-                    attempt += 1
-                    logger.warning(
-                        "%s failed (attempt %d/%d): %s",
-                        func.__name__,
-                        attempt,
-                        max_attempts,
-                        exc,
-                    )
-                    if attempt >= max_attempts:
-                        break
-                    time.sleep(min(delay, max_delay))
-                    delay *= 2
-            assert last_exc is not None
-            raise last_exc
-
-        return wrapper
-
-    return decorator
-
-
-def is_internet_reachable(host: str = "https://api.telegram.org", timeout: float = 5.0) -> bool:
-    """Best-effort connectivity probe used after boot / outages."""
-    try:
-        requests.head(host, timeout=timeout, verify=certifi.where())
-        return True
-    except requests.RequestException:
-        return False
-
-
-def wait_for_internet(poll_interval: float = 5.0, max_wait: float | None = None) -> bool:
-    """Block until the internet becomes reachable (or max_wait elapses)."""
-    waited = 0.0
-    while not is_internet_reachable():
-        logger.warning("No internet connectivity detected, waiting %.1fs...", poll_interval)
-        time.sleep(poll_interval)
-        waited += poll_interval
-        if max_wait is not None and waited >= max_wait:
-            return False
-    return True
 </file>
 
 <file path="utils/thingspeak.py">
@@ -2107,6 +1425,23 @@ echo "--> I2S configuration written. A reboot is required for changes to take ef
 echo "    After rebooting, verify with: arecord -l"
 </file>
 
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="0; url=./frontend/index.html">
+    <title>Redirecting to Smart Beehive Monitor Dashboard...</title>
+</head>
+<body style="background: #0f172a; color: #cbd5e1; font-family: sans-serif; text-align: center; padding: 50px;">
+    <p>Redirecting to <a href="./frontend/index.html" style="color: #f59e0b;">Smart Beehive Monitor Dashboard</a>...</p>
+    <script>
+        window.location.href = "./frontend/index.html";
+    </script>
+</body>
+</html>
+</file>
+
 <file path="install.sh">
 #!/usr/bin/env bash
 # install.sh
@@ -2191,385 +1526,6 @@ echo " IMPORTANT: A reboot is required for I2S/I2C overlay changes"
 echo " to take full effect if this is the first install:"
 echo "   sudo reboot"
 echo "=============================================="
-</file>
-
-<file path="instructions_ai.md">
-# BeeHive Monitor — Edge AI Upgrade Instructions
-
-> **Version**: NASSCOM Expo 2026 Edition
-> **Target Hardware**: Raspberry Pi 4 Model B (Debian Bookworm 64-bit)
-> **AI Model**: TFLite MFCC-based binary classifier (Normal vs Triggered)
-
----
-
-## 1. Folder Structure
-
-```
-BeeHiveMonitor/
-├── ai_module/                    ← NEW: self-contained AI package
-│   ├── __init__.py
-│   ├── ai_engine.py              ← TFLite inference engine (Pi)
-│   ├── train_model.py            ← Keras training script (PC)
-│   ├── requirements_ai.txt       ← AI-specific dependencies
-│   ├── bee_acoustic_model.tflite ← trained model (git-ignored)
-│   └── audio_samples/            ← bundled demo WAVs
-│       ├── Normal.wav            ← healthy hive recording (label 0)
-│       └── Triggered.wav         ← distressed hive recording (label 1)
-├── audio/                        ← legacy FFT pipeline (preserved)
-│   ├── capture.py                ← INMP441 I2S recording
-│   ├── fft.py                    ← FFT dominant-frequency analyser
-│   └── filters.py                ← DC removal, windowing, noise gate
-├── sensors/
-│   ├── inmp441_sensor.py         ← MODIFIED: AI-first, FFT-fallback
-│   ├── dht22_sensor.py
-│   ├── hx711_sensor.py
-│   └── mpu6050_sensor.py
-├── tgbot/
-│   ├── alerts.py                 ← MODIFIED: AI behaviour alerts
-│   ├── commands.py               ← MODIFIED: /set_ratio command
-│   └── keyboards.py
-├── utils/
-│   ├── calibration.py
-│   ├── csv_logger.py
-│   └── thingspeak.py
-├── config.py                     ← MODIFIED: secrets cleaned, AI config
-├── bot.py                        ← MODIFIED: /set_ratio, secret validation
-├── monitor.py                    ← MODIFIED: AI integration, cal recovery
-├── token.md                      ← systemd Environment= overrides (git-ignored)
-├── .env.example                  ← template for environment variables
-├── requirements.txt              ← MODIFIED: + librosa
-└── instructions_ai.md            ← THIS FILE
-```
-
-### Clean Revert to FFT-Only Mode
-
-Deleting or renaming the `ai_module/` directory (or just removing
-`bee_acoustic_model.tflite`) will cause `inmp441_sensor.py` to log a
-single warning at startup and automatically fall back to the legacy
-FFT peak-frequency analyser. No other code changes are required.
-
----
-
-## 2. How Secrets Are Loaded
-
-The system uses a layered secret-loading strategy:
-
-```
-Environment Variables  →  config.py _env() helpers  →  Application
-     ↑
-token.md / .env / systemd override
-```
-
-### Priority Order (highest wins)
-
-1. **Systemd override** (`/etc/systemd/system/beehive.service.d/override.conf`)
-2. **Shell environment variables** (e.g., `export BEEHIVE_TELEGRAM_TOKEN=...`)
-3. **`token.md`** (systemd `[Service]` `Environment=` format, loaded manually)
-
-### Required Secrets
-
-| Variable                  | Description                     |
-|---------------------------|---------------------------------|
-| `BEEHIVE_TELEGRAM_TOKEN`  | Telegram Bot API token          |
-| `BEEHIVE_ADMIN_ID`        | Telegram numeric user ID        |
-| `BEEHIVE_CHANNEL`         | Telegram channel username       |
-| `BEEHIVE_TS_ENV_KEY`      | ThingSpeak env/motion write key |
-| `BEEHIVE_TS_WA_KEY`       | ThingSpeak weight/audio write key|
-
-> **IMPORTANT**: `config.py` no longer contains hardcoded fallback
-> secrets. If any required secret is missing, `bot.py` and `monitor.py`
-> will log an error and exit at startup.
-
-### Setting Up `token.md`
-
-Create/edit `token.md` in the project root with your real credentials:
-
-```ini
-[Service]
-Environment=BEEHIVE_TELEGRAM_TOKEN=your_bot_token_here
-Environment=BEEHIVE_ADMIN_ID=your_numeric_id
-Environment=BEEHIVE_CHANNEL=@YourChannel
-Environment=BEEHIVE_CHANNEL_LINK=https://t.me/YourChannel
-Environment=BEEHIVE_TS_ENV_KEY=your_thingspeak_key
-Environment=BEEHIVE_TS_WA_KEY=your_thingspeak_key
-```
-
-Then source it before running, or install it as a systemd override:
-
-```bash
-sudo cp token.md /etc/systemd/system/beehive.service.d/override.conf
-sudo systemctl daemon-reload
-sudo systemctl restart beehive.service
-```
-
----
-
-## 3. AI Workflow Overview
-
-```
-┌──────────────────┐     ┌──────────────────┐
-│   Normal.wav     │     │  Triggered.wav   │
-│   (label 0)      │     │   (label 1)      │
-└────────┬─────────┘     └────────┬─────────┘
-         │                        │
-         └────────┬───────────────┘
-                  ▼
-    ┌──────────────────────────┐
-    │  train_model.py (PC)     │
-    │  1. Slice into 2s chunks │
-    │  2. Bandpass 100-800 Hz  │
-    │  3. Extract 40 MFCCs     │
-    │  4. Train Keras model    │
-    │  5. Export to TFLite     │
-    └──────────┬───────────────┘
-               ▼
-    ┌──────────────────────────┐
-    │ bee_acoustic_model.tflite│
-    │ (~10-50 KB)              │
-    └──────────┬───────────────┘
-               │  (copy to Pi)
-               ▼
-    ┌──────────────────────────┐
-    │  ai_engine.py (Pi)       │
-    │  1. Noise gate check     │
-    │  2. Bandpass 100-800 Hz  │
-    │  3. Extract 40 MFCCs     │
-    │  4. TFLite inference     │
-    │  5. Threshold @ 0.65     │
-    └──────────────────────────┘
-```
-
----
-
-## 4. Training on a PC
-
-### Prerequisites
-
-```bash
-# Create a virtual environment (recommended)
-python3 -m venv ai_venv
-source ai_venv/bin/activate  # Linux/Mac
-# ai_venv\Scripts\activate   # Windows
-
-# Install training dependencies
-pip install -r ai_module/requirements_ai.txt
-```
-
-### Audio Sample Files
-
-The demo audio files are **bundled in the repository** at:
-- `ai_module/audio_samples/Normal.wav` — healthy, calm hive (label 0)
-- `ai_module/audio_samples/Triggered.wav` — distressed/panic hive (label 1)
-
-These are automatically synced to the Raspberry Pi via `git pull`.
-To use custom recordings, either replace the files in-place or pass
-`--normal` / `--triggered` overrides on the command line.
-
-### Run Training
-
-With the bundled audio files, just run (no arguments needed):
-
-```bash
-python ai_module/train_model.py
-```
-
-Or with custom files / overrides:
-
-```bash
-python ai_module/train_model.py \
-    --normal  path/to/Custom_Normal.wav \
-    --triggered path/to/Custom_Triggered.wav \
-    --epochs 100
-```
-
-**Expected output:**
-
-```
-Loading Normal WAV:    .../ai_module/audio_samples/Normal.wav
-  → 15 chunks
-Loading Triggered WAV: .../ai_module/audio_samples/Triggered.wav
-  → 12 chunks
-
-Dataset: 27 samples (15 normal, 12 triggered)
-Model: "sequential"
-...
-Final training accuracy: 96.30%
-
-✅ TFLite model exported to: ai_module/bee_acoustic_model.tflite
-   Size: 12.4 KB
-```
-
----
-
-## 5. Deploying to Raspberry Pi
-
-### Transfer the Model
-
-Since the audio samples and training script are bundled in the repo,
-you can either train on the Pi directly or train on a PC and copy:
-
-```bash
-# Option A: Pull the full repo (audio samples included) and train on Pi
-cd ~/BeeHiveMonitor && git pull
-python ai_module/train_model.py
-
-# Option B: Train on PC, copy just the model
-scp ai_module/bee_acoustic_model.tflite pi@<pi-ip>:~/BeeHiveMonitor/ai_module/
-```
-
-### Install Pi-Side Dependencies
-
-```bash
-# Activate the project venv
-source ~/BeeHiveMonitor/venv/bin/activate
-
-# Install TFLite runtime (lightweight, no full TensorFlow needed)
-pip install tflite-runtime
-
-# Install librosa for MFCC extraction
-pip install librosa
-```
-
-### Verify TFLite Inference
-
-Quick smoke test on the Pi:
-
-```bash
-cd ~/BeeHiveMonitor
-python3 -c "
-from ai_module.ai_engine import AIAcousticEngine
-engine = AIAcousticEngine()
-print('AI engine available:', engine.available)
-if engine.available:
-    import numpy as np
-    # Generate a 2-second test signal
-    sr = 44100
-    t = np.linspace(0, 2.0, int(2.0 * sr), endpoint=False)
-    test_signal = 0.5 * np.sin(2 * np.pi * 250 * t)  # 250 Hz tone
-    result = engine.predict_acoustic_state(test_signal, sr)
-    print('Result:', result)
-"
-```
-
-**Expected output (with model deployed):**
-
-```
-AI acoustic engine loaded: /home/pi/BeeHiveMonitor/ai_module/bee_acoustic_model.tflite
-AI engine available: True
-Result: {'behavior': '🟢 Normal / Active', 'confidence': 0.87, 'is_silent': False}
-```
-
-**Expected output (without model):**
-
-```
-AI model not found at .../bee_acoustic_model.tflite — AI engine disabled (FFT fallback active)
-AI engine available: False
-```
-
----
-
-## 6. Fallback Behaviour
-
-The system is designed for **zero-downtime graceful degradation**:
-
-| Condition | Behaviour |
-|-----------|-----------|
-| `.tflite` present + runtime installed | Full AI classification |
-| `.tflite` missing | FFT-only (legacy frequency bands) |
-| `tflite-runtime` not installed | FFT-only (logged warning at startup) |
-| `librosa` not installed | FFT-only (logged warning at startup) |
-| `ai_module/` deleted entirely | FFT-only (import fails gracefully) |
-| AI inference throws at runtime | FFT-only for that cycle (try/except) |
-
----
-
-## 7. The `/set_ratio` Command
-
-Available to admins and approved members via Telegram:
-
-```
-/set_ratio 423.567890
-```
-
-This:
-1. Updates `data/calibration.json` with the new ratio
-2. Preserves the existing `weight_g` reference
-3. The running monitor picks up the new ratio on next restart
-
-Useful for fine-tuning the HX711 load cell without running the full
-guided calibration sequence (e.g., when the hive is occupied and
-you can't remove the weight).
-
----
-
-## 8. Calibration Auto-Recovery
-
-On boot, `monitor.py` checks `data/calibration.json`:
-
-- If a valid `scale_ratio` exists (≠ 1.0), it applies the saved
-  calibration directly via `hx711.apply_saved_calibration()` — **no
-  guided re-weigh sequence** is triggered.
-- If no prior calibration exists or the ratio is the default (1.0),
-  the full guided calibration flow runs as before.
-
-This prevents an occupied hive box from being forced through a
-re-weigh cycle after a power outage or reboot.
-
----
-
-## 9. Alert Labels
-
-### AI Mode (primary)
-
-| AI Prediction | Behaviour Label | Alert |
-|---------------|-----------------|-------|
-| > 0.65 | ⚔️ Triggered / Panic | ⚔️ DANGER: Hive Distress / Panic State Detected! |
-| ≤ 0.65 | 🟢 Normal / Active | — |
-| Below noise gate | Silence | — |
-
-### FFT Fallback Mode (legacy)
-
-| Frequency Range | Behaviour Label |
-|-----------------|-----------------|
-| > 450 Hz | ⚔️ Aggressive / Swarming |
-| 330–450 Hz | 👑 Queen Piping |
-| 190–329 Hz | 🟢 Normal / Active |
-| 100–189 Hz | 🆘 Queenless Roar |
-| 1–99 Hz | 💤 Dormant / Low |
-| 0 Hz | ⚪ Unknown / Silence |
-
----
-
-## 10. CSV Logging
-
-The `data/hive_update.csv` file now includes the AI behaviour label in
-the `Behavior` column. Example:
-
-```csv
-Timestamp,Temperature (C),Humidity (%),Weight (g),Frequency (Hz),Behavior,Accel X,...
-2026-08-02 14:30:00,33.2,55.0,1250.00,245.67,🟢 Normal / Active,0.02,...
-2026-08-02 14:30:25,33.3,54.8,1250.10,312.45,⚔️ Triggered / Panic,0.03,...
-```
-
----
-
-## Troubleshooting
-
-### "AI engine disabled" at startup
-- Verify `bee_acoustic_model.tflite` exists in `ai_module/`
-- Check `tflite-runtime` or `tensorflow` is installed: `pip list | grep -i tflite`
-- Check `librosa` is installed: `python3 -c "import librosa; print(librosa.__version__)"`
-
-### Training produces poor accuracy
-- Ensure WAV files are long enough (≥10s each → 5+ chunks)
-- Verify audio quality — the demo speaker should be close to the INMP441
-- Try increasing epochs: `--epochs 100`
-- Check that Normal and Triggered sounds are genuinely distinct
-
-### Secrets missing at startup
-- Run `cat token.md` and verify all `Environment=` lines are present
-- If using systemd: `systemctl show beehive.service | grep Environment`
-- Manually export and test: `export BEEHIVE_TELEGRAM_TOKEN=... && python3 bot.py`
 </file>
 
 <file path="README.md">
@@ -2734,6 +1690,1506 @@ python3 monitor.py 650 "Dev User" 123456789
 ```
 </file>
 
+<file path="ai_module/ai_engine.py">
+# -*- coding: utf-8 -*-
+"""
+ai_module/ai_engine.py
+=======================
+Edge AI acoustic inference engine for the BeeHive Monitor.
+
+Loads a TensorFlow Lite model (``bee_acoustic_model.tflite``) and
+classifies a raw audio buffer as **Normal** or **Triggered / Panic**
+using 40 Mel-Frequency Cepstral Coefficients (MFCCs) extracted after
+a 100–800 Hz SciPy bandpass filter.
+
+Falls back gracefully when the model file or TFLite runtime is absent,
+allowing the caller (``Inmp441Sensor``) to revert to the legacy FFT
+peak-frequency analyser transparently.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from scipy.signal import butter, sosfilt
+
+from config import (
+    AI_CONFIDENCE_THRESHOLD,
+    AI_MFCC_COEFFICIENTS,
+    AI_MODEL_PATH,
+    FFT_BAND_HIGH_HZ,
+    FFT_BAND_LOW_HZ,
+    FFT_NOISE_GATE,
+)
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TFLite runtime import — prefer the lightweight ``tflite_runtime`` package
+# (recommended on Raspberry Pi) but accept the full TensorFlow fallback.
+# ---------------------------------------------------------------------------
+_Interpreter = None  # type: ignore[assignment]
+try:
+    from tflite_runtime.interpreter import Interpreter as _Interpreter  # type: ignore[no-redef]
+except ImportError:
+    try:
+        from tensorflow.lite import Interpreter as _Interpreter  # type: ignore[no-redef]
+    except ImportError:
+        pass
+
+# ---------------------------------------------------------------------------
+# Librosa import (for MFCC extraction)
+# ---------------------------------------------------------------------------
+try:
+    import librosa  # type: ignore[import-untyped]
+except ImportError:
+    librosa = None  # type: ignore[assignment]
+
+
+# ======================================================================
+# Bandpass filter utility
+# ======================================================================
+def bandpass_filter(
+    samples: np.ndarray,
+    sample_rate: float,
+    low_hz: float = FFT_BAND_LOW_HZ,
+    high_hz: float = FFT_BAND_HIGH_HZ,
+    order: int = 5,
+) -> np.ndarray:
+    """Apply a Butterworth bandpass filter to isolate bee acoustics."""
+    nyquist = sample_rate / 2.0
+    low = max(low_hz / nyquist, 1e-5)
+    high = min(high_hz / nyquist, 1.0 - 1e-5)
+    sos = butter(order, [low, high], btype="band", output="sos")
+    return sosfilt(sos, samples).astype(np.float32)
+
+
+# ======================================================================
+# MFCC extraction utility
+# ======================================================================
+def extract_mfcc(
+    samples: np.ndarray,
+    sample_rate: float,
+    n_mfcc: int = AI_MFCC_COEFFICIENTS,
+) -> np.ndarray:
+    """Compute mean MFCCs across time for a mono audio buffer.
+
+    Returns a 1-D array of shape ``(n_mfcc,)``.
+    """
+    if librosa is None:
+        raise RuntimeError("librosa is not installed — cannot extract MFCCs")
+
+    audio = samples.astype(np.float32)
+    mfccs = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=n_mfcc)
+    mfcc_mean = np.mean(mfccs, axis=1).astype(np.float32)  # (n_mfcc,)
+    std = np.std(mfcc_mean)
+    if std > 1e-6:
+        mfcc_mean = (mfcc_mean - np.mean(mfcc_mean)) / std
+    return mfcc_mean.astype(np.float32)
+
+
+# ======================================================================
+# AIAcousticEngine
+# ======================================================================
+class AIAcousticEngine:
+    """TFLite inference wrapper for bee acoustic classification.
+
+    If the model file is missing, or the TFLite runtime / librosa are
+    not installed, construction succeeds but ``available`` is ``False``
+    and every call to ``predict_acoustic_state`` will raise
+    ``RuntimeError`` so the caller can fall back to legacy FFT.
+    """
+
+    def __init__(self, model_path: Optional[Path] = None) -> None:
+        self._model_path = Path(model_path or AI_MODEL_PATH)
+        self._interpreter = None
+        self._input_details = None
+        self._output_details = None
+        self.available = False
+
+        if _Interpreter is None:
+            logger.warning("TFLite runtime not installed — AI engine disabled")
+            return
+        if librosa is None:
+            logger.warning("librosa not installed — AI engine disabled")
+            return
+        if not self._model_path.is_file():
+            logger.warning(
+                "AI model not found at %s — AI engine disabled (FFT fallback active)",
+                self._model_path,
+            )
+            return
+
+        try:
+            self._interpreter = _Interpreter(model_path=str(self._model_path))
+            self._interpreter.allocate_tensors()
+            self._input_details = self._interpreter.get_input_details()
+            self._output_details = self._interpreter.get_output_details()
+            self.available = True
+            logger.info("AI acoustic engine loaded: %s", self._model_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to load AI model: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def predict_acoustic_state(
+        self,
+        samples: np.ndarray,
+        sample_rate: float,
+    ) -> dict:
+        """Classify an audio buffer.
+
+        Returns a dict with keys:
+            ``behavior``   – human-readable status label
+            ``confidence`` – float in [0, 1]
+            ``is_silent``  – True when the buffer is below the noise gate
+        """
+        if not self.available:
+            raise RuntimeError("AI engine is not available")
+
+        # ---- Noise gate (same threshold used by the FFT analyser) ----
+        peak = float(np.max(np.abs(samples)))
+        if peak < FFT_NOISE_GATE:
+            return {"behavior": "Silence", "confidence": 1.0, "is_silent": True}
+
+        # ---- Pre-processing ------------------------------------------
+        filtered = bandpass_filter(samples, sample_rate)
+        mfcc_features = extract_mfcc(filtered, sample_rate)
+        input_data = mfcc_features.reshape(1, -1).astype(np.float32)
+
+        # ---- TFLite inference ----------------------------------------
+        self._interpreter.set_tensor(self._input_details[0]["index"], input_data)
+        self._interpreter.invoke()
+        prediction = float(
+            self._interpreter.get_tensor(self._output_details[0]["index"])[0][0]
+        )
+
+        # ---- Decision ------------------------------------------------
+        if prediction > AI_CONFIDENCE_THRESHOLD:
+            return {
+                "behavior": "⚔️ Triggered / Panic",
+                "confidence": prediction,
+                "is_silent": False,
+            }
+        return {
+            "behavior": "🟢 Normal / Active",
+            "confidence": 1.0 - prediction,
+            "is_silent": False,
+        }
+</file>
+
+<file path="audio/capture.py">
+# -*- coding: utf-8 -*-
+"""
+audio/capture.py
+=================
+Continuous audio capture from the INMP441 I2S MEMS microphone via the
+Raspberry Pi's native I2S peripheral, exposed to Python through
+`sounddevice` (PortAudio). No SPI/ADC hardware (MCP3008, TL072,
+ADS1115) is involved -- the INMP441 outputs digital I2S data directly.
+
+Requires `enable_i2s.sh` to have configured `dtoverlay=googlevoicehat-soundcard`
+(or an equivalent I2S microphone overlay) in `/boot/firmware/config.txt`
+and the device to appear in `arecord -l` / `sounddevice.query_devices()`.
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Optional
+
+import numpy as np
+
+try:
+    import sounddevice as sd
+except (ImportError, OSError) as exc:
+    # ImportError: the `sounddevice` package itself isn't installed.
+    # OSError: the package is installed but PortAudio's shared library
+    # is missing/unreachable on this system.
+    sd = None  # type: ignore[assignment]
+    _IMPORT_ERROR: Optional[Exception] = exc
+else:
+    _IMPORT_ERROR = None
+
+from config import (
+    INMP441_BLOCK_SIZE,
+    INMP441_CAPTURE_SECONDS,
+    INMP441_CHANNELS,
+    INMP441_DEVICE,
+    INMP441_DTYPE,
+    INMP441_SAMPLE_RATE,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class MicrophoneUnavailableError(RuntimeError):
+    """Raised when the INMP441 / I2S audio backend cannot be reached."""
+
+
+class Inmp441Capture:
+    """Thread-safe wrapper around a `sounddevice` input stream for the
+    INMP441 I2S microphone, providing simple blocking captures that the
+    monitor loop can call once per cycle without managing PortAudio
+    state itself."""
+
+    def __init__(
+        self,
+        sample_rate: int = INMP441_SAMPLE_RATE,
+        channels: int = INMP441_CHANNELS,
+        device: str = INMP441_DEVICE,
+        dtype: str = INMP441_DTYPE,
+        block_size: int = INMP441_BLOCK_SIZE,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.device = device or None
+        self.dtype = dtype
+        self.block_size = block_size
+        self._lock = threading.Lock()
+        self._last_error: Optional[str] = None
+
+    def _ensure_backend(self) -> None:
+        if sd is None:
+            raise MicrophoneUnavailableError(
+                f"sounddevice/PortAudio unavailable: {_IMPORT_ERROR}"
+            )
+
+    def is_available(self) -> bool:
+        """Best-effort check that the I2S microphone can be opened."""
+        try:
+            self._ensure_backend()
+            with self._lock:
+                sd.check_input_settings(
+                    device=self.device,
+                    channels=self.channels,
+                    samplerate=self.sample_rate,
+                    dtype=self.dtype,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
+            logger.warning("INMP441 microphone unavailable: %s", exc)
+            return False
+
+    def capture(self, duration_s: float = INMP441_CAPTURE_SECONDS) -> np.ndarray:
+        """Blocking capture of `duration_s` seconds of mono float64 audio,
+        normalized to roughly [-1, 1]. Raises MicrophoneUnavailableError
+        on failure so callers can decide how to degrade gracefully."""
+        self._ensure_backend()
+        frames = int(duration_s * self.sample_rate)
+        with self._lock:
+            try:
+                recording = sd.rec(
+                    frames,
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    dtype=self.dtype,
+                    device=self.device,
+                    blocking=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = str(exc)
+                raise MicrophoneUnavailableError(f"INMP441 capture failed: {exc}") from exc
+
+        audio = np.asarray(recording, dtype=np.float64)
+        if audio.ndim > 1 and audio.shape[1] >= 1:
+            audio = audio[:, 0]  # Isolate active Left channel from INMP441 I2S stream
+
+        # Normalize by dtype's full-scale range so gain is consistent
+        # regardless of the configured sample format.
+        if self.dtype == "int32":
+            audio /= float(2**31)
+        elif self.dtype == "int16":
+            audio /= float(2**15)
+        # float32/float64 streams are already roughly in [-1, 1].
+
+        return audio
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
+</file>
+
+<file path="frontend/index.html">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🐝 Smart Hive Monitor — Edge AI & IoT Dashboard</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        /* Custom Scrollbar for Tables & Main View */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Tab Transitions & Animations */
+        .tab-content { display: none; animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .tab-content.active { display: block; }
+        
+        @keyframes fadeIn { 
+            from { opacity: 0; transform: translateY(8px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+
+        /* Pulse animation for live status badge */
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.85; transform: scale(0.98); }
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+
+        /* Table Styling Overrides */
+        td, th { white-space: nowrap; }
+        
+        /* Slider Styling */
+        input[type=range] {
+            -webkit-appearance: none; 
+            background: transparent; 
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 20px;
+            width: 20px;
+            border-radius: 50%;
+            background: #f59e0b; /* Amber-500 */
+            cursor: pointer;
+            margin-top: -7px; 
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+            transition: transform 0.15s ease;
+        }
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            cursor: pointer;
+            background: #334155;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans selection:bg-amber-500 selection:text-slate-950 min-h-screen">
+
+    <!-- Top Navigation Banner -->
+    <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur sticky top-0 z-50 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div class="flex flex-col md:flex-row justify-between items-center gap-4">
+                <div class="flex items-center space-x-3 text-center md:text-left">
+                    <div class="bg-gradient-to-tr from-amber-500 to-yellow-300 p-2.5 rounded-xl text-slate-950 shadow-lg shadow-amber-500/20">
+                        <i class="fas fa-cubes text-2xl animate-bounce-short"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white flex items-center justify-center md:justify-start gap-2">
+                            <span>Smart Hive Monitor</span>
+                            <span class="text-xs uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">v2.0 Edge AI</span>
+                        </h1>
+                        <p class="text-slate-400 text-xs sm:text-sm mt-0.5">Real-Time IoT Telemetry & INMP441 Acoustic Neural Classifier</p>
+                    </div>
+                </div>
+                
+                <!-- Navigation Switch -->
+                <div class="flex bg-slate-950/80 p-1.5 rounded-xl border border-slate-800 shadow-inner">
+                    <button onclick="switchTab('charts')" id="btn-charts" class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 flex items-center gap-2">
+                        <i class="fas fa-chart-area"></i> Live Graphs
+                    </button>
+                    <button onclick="switchTab('tables')" id="btn-tables" class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2">
+                        <i class="fas fa-table"></i> Sensor Logs
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        <!-- Live KPI Snapshot Bar -->
+        <section class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <!-- Temperature KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-red-500/10 rounded-full blur-xl group-hover:bg-red-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Temperature</p>
+                    <i class="fas fa-temperature-three-quarters text-red-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-temp" class="text-2xl sm:text-3xl font-extrabold text-white mt-2">-- °C</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-clock text-slate-600"></i> DHT22 Sensor</p>
+            </div>
+
+            <!-- Humidity KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Humidity</p>
+                    <i class="fas fa-droplet text-blue-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-humidity" class="text-2xl sm:text-3xl font-extrabold text-white mt-2">-- %</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-clock text-slate-600"></i> DHT22 Sensor</p>
+            </div>
+
+            <!-- Weight KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-amber-500/10 rounded-full blur-xl group-hover:bg-amber-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Hive Weight</p>
+                    <i class="fas fa-scale-balanced text-amber-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-weight" class="text-2xl sm:text-3xl font-extrabold text-amber-300 mt-2">-- g</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-circle-check text-emerald-500"></i> HX711 Calibrated</p>
+            </div>
+
+            <!-- Acoustic AI Behavior KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-purple-500/10 rounded-full blur-xl group-hover:bg-purple-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Acoustic AI State</p>
+                    <i class="fas fa-microscope text-purple-400 text-lg"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <h3 id="kpi-freq" class="text-2xl font-bold text-purple-300">-- Hz</h3>
+                    <span id="kpi-badge" class="px-2.5 py-0.5 text-xs font-bold rounded-md bg-slate-800 text-slate-300 border border-slate-700 animate-pulse-slow">Standby</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-microphone-lines text-purple-400"></i> INMP441 I2S + TFLite</p>
+            </div>
+        </section>
+
+        <!-- Loading / Refresh Toast -->
+        <div id="loading" class="flex items-center justify-center gap-3 py-3 px-6 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-semibold mb-6 shadow-md transition-opacity hidden">
+            <i class="fas fa-circle-notch fa-spin text-lg"></i>
+            <span>Synchronizing live hive feeds from ThingSpeak cloud...</span>
+        </div>
+
+        <!-- VIEW 1: CHARTS -->
+        <div id="view-charts" class="tab-content active space-y-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Weight Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span>
+                            <span>Weight Trend (HX711 Load Cell)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 2 : Field 1</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="weightChart"></canvas></div>
+                </div>
+
+                <!-- Acoustic Frequency Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block"></span>
+                            <span>Dominant Bee Buzz Frequency (INMP441)</span>
+                        </h2>
+                        <span class="text-xs text-purple-300 bg-purple-950/50 px-2.5 py-1 rounded-full border border-purple-800 font-mono">100Hz – 800Hz Band</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="freqChart"></canvas></div>
+                </div>
+
+                <!-- Climate Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-rose-400 inline-block"></span>
+                            <span>Hive Climate (Temperature & Humidity)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 1 : Fields 1 & 2</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="climateChart"></canvas></div>
+                </div>
+
+                <!-- Motion Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-teal-400 inline-block"></span>
+                            <span>Hive Tilt & Vibration (MPU6050 Accel G)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 1 : Fields 3-5</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="accelChart"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- VIEW 2: TABLES -->
+        <div id="view-tables" class="tab-content space-y-6">
+            
+            <!-- Slider Control -->
+            <div class="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <div class="p-2.5 rounded-xl bg-slate-800 text-amber-400 border border-slate-700">
+                        <i class="fas fa-filter text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-white text-base">Telemetry Data Filter</h3>
+                        <p class="text-xs text-slate-400">Adjust depth of historical rows loaded from cloud logs</p>
+                    </div>
+                </div>
+                <div class="flex items-center w-full sm:w-auto bg-slate-950/80 px-5 py-3 rounded-xl border border-slate-800/90 gap-4">
+                    <label for="rowRange" class="text-sm font-semibold text-slate-300 whitespace-nowrap">Show history:</label>
+                    <input type="range" id="rowRange" min="1" max="25" value="10" step="1" 
+                           class="w-full sm:w-48"
+                           oninput="updateSliderValue(this.value)">
+                    <div class="min-w-[4.5rem] text-right">
+                        <span id="sliderValue" class="text-amber-400 font-extrabold font-mono text-lg">10</span>
+                        <span class="text-xs text-slate-400 font-medium">rows</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4 Tables Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                
+                <!-- 1. DHT22 Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-rose-300 flex items-center gap-2">
+                            <i class="fas fa-thermometer-half text-rose-400"></i> DHT22 Climate Logs
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">GPIO 4</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-6 py-3.5">Timestamp</th>
+                                    <th class="px-6 py-3.5 text-rose-400">Temp (°C)</th>
+                                    <th class="px-6 py-3.5 text-blue-400">Humidity (%)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-dht-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 2. INMP441 Acoustic Table with Edge AI badge -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-purple-300 flex items-center gap-2">
+                            <i class="fas fa-brain text-purple-400"></i> INMP441 Acoustic Neural Logs
+                        </h3>
+                        <span class="text-xs font-semibold text-purple-300 bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800">I2S Digital 48kHz</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-5 py-3.5">Timestamp</th>
+                                    <th class="px-5 py-3.5 text-purple-400">Freq (Hz)</th>
+                                    <th class="px-5 py-3.5">Inferred Acoustic State</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-max-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 3. HX711 Weight Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-amber-300 flex items-center gap-2">
+                            <i class="fas fa-balance-scale text-amber-400"></i> HX711 Scale Telemetry
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">GPIO 5 & 6</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-6 py-3.5">Timestamp</th>
+                                    <th class="px-6 py-3.5 text-amber-400">Weight (Grams)</th>
+                                    <th class="px-6 py-3.5 text-slate-400">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-hx-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 4. MPU6050 Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-teal-300 flex items-center gap-2">
+                            <i class="fas fa-cubes text-teal-400"></i> MPU6050 Motion & Vibration
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">I2C Bus 1 (0x68)</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-4 py-3.5">Timestamp</th>
+                                    <th class="px-3 py-3.5 text-rose-400">Ax</th>
+                                    <th class="px-3 py-3.5 text-emerald-400">Ay</th>
+                                    <th class="px-3 py-3.5 text-blue-400">Az (G)</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gx</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gy</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gz</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-mpu-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-800/80 mt-16 py-8 text-center text-slate-500 text-xs sm:text-sm bg-slate-900/40">
+        <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <p class="flex items-center gap-2">
+                <span>🐝 Smart Beehive Monitoring & Alert System — NASSCOM 2026 Edition</span>
+            </p>
+            <div class="flex items-center space-x-4 text-xs">
+                <span class="px-2.5 py-1 rounded-md bg-slate-800 text-slate-400 border border-slate-700">Channel 1: 3442110</span>
+                <span class="px-2.5 py-1 rounded-md bg-slate-800 text-slate-400 border border-slate-700">Channel 2: 3442111</span>
+                <a href="https://thingspeak.com" target="_blank" class="text-amber-400 hover:underline font-semibold flex items-center gap-1">ThingSpeak Cloud <i class="fas fa-external-link-alt text-[10px]"></i></a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // --- GLOBAL DATA STORE ---
+        let globalFeeds1 = [];
+        let globalFeeds2 = [];
+        
+        // --- TABS LOGIC ---
+        function switchTab(tabName) {
+            document.getElementById('view-charts').classList.remove('active');
+            document.getElementById('view-tables').classList.remove('active');
+            
+            document.getElementById('btn-charts').className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2";
+            document.getElementById('btn-tables').className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2";
+
+            document.getElementById('view-' + tabName).classList.add('active');
+            document.getElementById('btn-' + tabName).className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 flex items-center gap-2";
+        }
+
+        // --- SLIDER LOGIC ---
+        function updateSliderValue(val) {
+            document.getElementById('sliderValue').innerText = val;
+            renderTables(globalFeeds1, globalFeeds2, parseInt(val));
+        }
+
+        // --- BEHAVIOR CLASSIFIER HELPER ---
+        function classifyAcoustics(freq) {
+            const f = parseFloat(freq);
+            if (isNaN(f) || f <= 0) return { label: "⚪ Silence", color: "bg-slate-800 text-slate-400 border-slate-700" };
+            if (f > 450) return { label: "⚔️ Aggressive / Swarming", color: "bg-red-950/80 text-red-300 border-red-700 font-bold" };
+            if (f >= 330 && f <= 450) return { label: "👑 Queen Piping", color: "bg-amber-950/80 text-amber-300 border-amber-600 font-bold" };
+            if (f >= 190 && f < 330) return { label: "🟢 Normal / Active", color: "bg-emerald-950/80 text-emerald-300 border-emerald-700 font-bold" };
+            if (f >= 100 && f < 190) return { label: "🆘 Queenless Roar", color: "bg-rose-950/80 text-rose-300 border-rose-700 font-bold" };
+            if (f > 0 && f < 100) return { label: "💤 Dormant / Low", color: "bg-blue-950/80 text-blue-300 border-blue-700" };
+            return { label: "⚪ Standby", color: "bg-slate-800 text-slate-400 border-slate-700" };
+        }
+
+        // --- DATA FETCHING ---
+        const CH1_URL = "https://api.thingspeak.com/channels/3442110/feeds.json?api_key=FO1XVYZQTKHTAZ9K&results=25";
+        const CH2_URL = "https://api.thingspeak.com/channels/3442111/feeds.json?api_key=LEVD71XJS28RQZQJ&results=25";
+
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = '#1e293b';
+        Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+        let chartInstances = {};
+
+        async function fetchAllData() {
+            const loader = document.getElementById('loading');
+            loader.classList.remove('hidden');
+
+            try {
+                const [res1, res2] = await Promise.all([fetch(CH1_URL), fetch(CH2_URL)]);
+                const data1 = await res1.json();
+                const data2 = await res2.json();
+
+                globalFeeds1 = data1.feeds || [];
+                globalFeeds2 = data2.feeds || [];
+
+                // Update KPI Snapshot Cards with latest data
+                if (globalFeeds1.length > 0) {
+                    const latest1 = globalFeeds1[globalFeeds1.length - 1];
+                    document.getElementById('kpi-temp').innerText = (latest1.field1 || '--') + " °C";
+                    document.getElementById('kpi-humidity').innerText = (latest1.field2 || '--') + " %";
+                }
+                if (globalFeeds2.length > 0) {
+                    const latest2 = globalFeeds2[globalFeeds2.length - 1];
+                    document.getElementById('kpi-weight').innerText = (latest2.field1 ? parseFloat(latest2.field1).toFixed(1) : '--') + " g";
+                    
+                    const freqVal = latest2.field3 || '0.00';
+                    document.getElementById('kpi-freq').innerText = parseFloat(freqVal).toFixed(1) + " Hz";
+                    const status = classifyAcoustics(freqVal);
+                    const badge = document.getElementById('kpi-badge');
+                    badge.innerText = status.label.replace(/^[^\s]+\s/, ''); // clean emoji for compact badge
+                    badge.className = `px-2.5 py-1 text-xs rounded-md border ${status.color}`;
+                }
+
+                updateCharts(globalFeeds1, globalFeeds2);
+                
+                const currentLimit = document.getElementById('rowRange').value;
+                renderTables(globalFeeds1, globalFeeds2, parseInt(currentLimit));
+
+            } catch (err) {
+                console.error("Error fetching data:", err);
+            } finally {
+                loader.classList.add('hidden');
+            }
+        }
+
+        // --- TABLE RENDERER ---
+        function renderTables(feeds1, feeds2, limit) {
+            const dhtBody = document.getElementById('table-dht-body');
+            const hxBody = document.getElementById('table-hx-body');
+            const maxBody = document.getElementById('table-max-body');
+            const mpuBody = document.getElementById('table-mpu-body');
+            
+            dhtBody.innerHTML = '';
+            hxBody.innerHTML = '';
+            maxBody.innerHTML = '';
+            mpuBody.innerHTML = '';
+
+            const slice1 = [...feeds1].reverse().slice(0, limit);
+            const slice2 = [...feeds2].reverse().slice(0, limit);
+
+            // 1. DHT22 (Channel 1: Field 1 & 2)
+            slice1.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-6 py-3 text-slate-400">${date}</td>
+                        <td class="px-6 py-3 font-bold text-rose-300 text-sm">${f.field1 || '-'} °C</td>
+                        <td class="px-6 py-3 font-bold text-blue-300 text-sm">${f.field2 || '-'} %</td>
+                    </tr>`;
+                dhtBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 2. INMP441 Acoustic AI (Channel 2: Field 3)
+            slice2.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const freq = f.field3 ? parseFloat(f.field3).toFixed(1) + ' Hz' : '-';
+                const classification = classifyAcoustics(f.field3);
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-5 py-3 text-slate-400">${date}</td>
+                        <td class="px-5 py-3 font-bold text-purple-300 text-sm">${freq}</td>
+                        <td class="px-5 py-3"><span class="px-2.5 py-1 rounded border text-xs ${classification.color}">${classification.label}</span></td>
+                    </tr>`;
+                maxBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 3. HX711 (Channel 2: Field 1)
+            slice2.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const weight = f.field1 ? parseFloat(f.field1).toFixed(2) : null;
+                const statusBadge = weight !== null ? 
+                    (weight < 0 ? '<span class="text-red-400">Check Zero</span>' : '<span class="text-emerald-400">Nominal</span>') : '-';
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-6 py-3 text-slate-400">${date}</td>
+                        <td class="px-6 py-3 font-bold text-amber-300 text-sm">${weight !== null ? weight + ' g' : '-'}</td>
+                        <td class="px-6 py-3 font-sans text-xs">${statusBadge}</td>
+                    </tr>`;
+                hxBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 4. MPU6050 (Channel 1: Fields 3,4,5,6,7,8)
+            slice1.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-4 py-3 text-slate-400 text-[11px]">${date}</td>
+                        <td class="px-3 py-3 text-rose-300">${f.field3 || '-'}</td>
+                        <td class="px-3 py-3 text-emerald-300">${f.field4 || '-'}</td>
+                        <td class="px-3 py-3 font-bold text-blue-300">${f.field5 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field6 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field7 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field8 || '-'}</td>
+                    </tr>`;
+                mpuBody.insertAdjacentHTML('beforeend', row);
+            });
+        }
+
+        // --- CHART RENDERER ---
+        function formatTime(ts) {
+            return new Date(ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second: '2-digit'});
+        }
+
+        function updateCharts(feeds1, feeds2) {
+            const labels1 = feeds1.map(f => formatTime(f.created_at));
+            const labels2 = feeds2.map(f => formatTime(f.created_at));
+
+            renderChart('weightChart', labels2, [{
+                label: 'Weight (Grams)',
+                data: feeds2.map(f => f.field1),
+                borderColor: '#f59e0b',
+                backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                borderWidth: 2.5,
+                fill: true, tension: 0.35, pointRadius: 3, pointHoverRadius: 6
+            }]);
+
+            renderChart('freqChart', labels2, [{
+                label: 'Dominant Frequency (Hz)',
+                data: feeds2.map(f => f.field3),
+                borderColor: '#c084fc',
+                backgroundColor: 'rgba(192, 132, 252, 0.12)',
+                borderWidth: 2.5,
+                fill: true, tension: 0.35, pointRadius: 3, pointHoverRadius: 6
+            }]);
+
+            renderChart('climateChart', labels1, [
+                { label: 'Temp (°C)', data: feeds1.map(f => f.field1), borderColor: '#fb7185', borderWidth: 2.5, yAxisID: 'y', tension: 0.3, pointRadius: 2 },
+                { label: 'Humidity (%)', data: feeds1.map(f => f.field2), borderColor: '#60a5fa', borderWidth: 2.5, yAxisID: 'y1', tension: 0.3, pointRadius: 2 }
+            ]);
+
+            renderChart('accelChart', labels1, [
+                { label: 'Accel X', data: feeds1.map(f => f.field3), borderColor: '#fb7185', pointRadius: 1, borderWidth: 2, tension: 0.2 },
+                { label: 'Accel Y', data: feeds1.map(f => f.field4), borderColor: '#34d399', pointRadius: 1, borderWidth: 2, tension: 0.2 },
+                { label: 'Accel Z (G)', data: feeds1.map(f => f.field5), borderColor: '#60a5fa', pointRadius: 2, borderWidth: 2.5, tension: 0.2 }
+            ]);
+        }
+
+        function renderChart(canvasId, labels, datasets) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            const scales = { 
+                x: { grid: { color: 'rgba(51, 65, 85, 0.4)' }, ticks: { font: { size: 11 } } }, 
+                y: { grid: { color: 'rgba(51, 65, 85, 0.4)' }, ticks: { font: { size: 11 } } } 
+            };
+            if(canvasId === 'climateChart') {
+                scales.y = { type: 'linear', display: true, position: 'left', grid: { color: 'rgba(51, 65, 85, 0.4)' }, title: { display: true, text: 'Temp (°C)', color: '#fb7185' } };
+                scales.y1 = { type: 'linear', display: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Humidity (%)', color: '#60a5fa' } };
+            }
+            if (chartInstances[canvasId]) {
+                chartInstances[canvasId].data.labels = labels;
+                chartInstances[canvasId].data.datasets = datasets;
+                chartInstances[canvasId].update('none');
+            } else {
+                chartInstances[canvasId] = new Chart(ctx, {
+                    type: 'line', data: { labels, datasets },
+                    options: { 
+                        responsive: true, 
+                        maintainAspectRatio: false, 
+                        interaction: { mode: 'index', intersect: false }, 
+                        scales: scales, 
+                        plugins: { 
+                            legend: { labels: { color: '#e2e8f0', usePointStyle: true, boxWidth: 8 } },
+                            tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#f8fafc', bodyColor: '#cbd5e1', borderColor: '#334155', borderWidth: 1 }
+                        } 
+                    }
+                });
+            }
+        }
+
+        // Initial launch & poller
+        fetchAllData();
+        setInterval(fetchAllData, 15000);
+    </script>
+</body>
+</html>
+</file>
+
+<file path="utils/network.py">
+# -*- coding: utf-8 -*-
+"""
+utils/network.py
+=================
+Network hardening helpers: a pre-configured `requests.Session` with
+retry/backoff for transient failures (used by ThingSpeak and Telegram
+helpers), plus a generic retry decorator for arbitrary callables such
+as sensor reads that talk to hardware over I2C/SPI-like buses.
+"""
+
+from __future__ import annotations
+
+import functools
+import time
+from typing import Any, Callable, TypeVar
+
+import certifi
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from config import NETWORK_BACKOFF_BASE, NETWORK_BACKOFF_MAX, NETWORK_MAX_RETRIES
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+T = TypeVar("T")
+
+
+def build_http_session(
+    total: int = NETWORK_MAX_RETRIES, backoff: float = NETWORK_BACKOFF_BASE
+) -> requests.Session:
+    """Return a `requests.Session` configured with retry/backoff and a
+    trusted CA bundle, used for all outbound HTTP calls (ThingSpeak,
+    Telegram REST fallback, etc.)."""
+    retry = Retry(
+        total=total,
+        connect=total,
+        read=total,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.verify = certifi.where()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def retry_with_backoff(
+    max_attempts: int = NETWORK_MAX_RETRIES,
+    base_delay: float = NETWORK_BACKOFF_BASE,
+    max_delay: float = NETWORK_BACKOFF_MAX,
+    exceptions: tuple = (Exception,),
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator: retry a function call with exponential backoff.
+
+    Never raises after exhausting attempts when `default` is supplied
+    via functools.partial-style wrapping is not needed here -- callers
+    that want graceful degradation should catch the final exception.
+    """
+
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            attempt = 0
+            delay = base_delay
+            last_exc: Exception | None = None
+            while attempt < max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as exc:  # noqa: BLE001
+                    last_exc = exc
+                    attempt += 1
+                    logger.warning(
+                        "%s failed (attempt %d/%d): %s",
+                        func.__name__,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    if attempt >= max_attempts:
+                        break
+                    time.sleep(min(delay, max_delay))
+                    delay *= 2
+            assert last_exc is not None
+            raise last_exc
+
+        return wrapper
+
+    return decorator
+
+
+def is_internet_reachable(host: str = "https://www.google.com", timeout: float = 5.0) -> bool:
+    """Best-effort connectivity probe resistant to campus Telegram domain restrictions."""
+    try:
+        requests.head(host, timeout=timeout, verify=certifi.where())
+        return True
+    except requests.RequestException:
+        return False
+
+
+def wait_for_internet(poll_interval: float = 5.0, max_wait: float | None = None) -> bool:
+    """Block until the internet becomes reachable (or max_wait elapses)."""
+    waited = 0.0
+    while not is_internet_reachable():
+        logger.warning("No internet connectivity detected, waiting %.1fs...", poll_interval)
+        time.sleep(poll_interval)
+        waited += poll_interval
+        if max_wait is not None and waited >= max_wait:
+            return False
+    return True
+</file>
+
+<file path="monitor.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+monitor.py
+==========
+Main hive monitoring loop. Reads the HX711 load cell, DHT22, MPU6050,
+and INMP441 (I2S) sensors on a fixed cycle, classifies bee acoustic
+behaviour (via Edge AI when available, FFT fallback otherwise),
+evaluates alert rules, logs to CSV, uploads to ThingSpeak, and posts
+a formatted hive update plus any alerts to the Telegram channel.
+
+Invoked either directly:
+    python3 monitor.py [calibration_weight_g] [starter_name] [starter_id]
+
+or with no arguments, in which case it recovers the last persisted
+calibration automatically (post-reboot recovery).
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+import traceback
+
+import certifi
+
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+from config import (
+    DEFAULT_CALIBRATION_WEIGHT_G,
+    MONITOR_CYCLE_SECONDS,
+    MONITOR_IDLE_SLEEP,
+    TELEGRAM_LOG_CHANNEL,
+    validate_secrets,
+)
+from sensors.dht22_sensor import Dht22Sensor
+from sensors.hx711_sensor import HX711Sensor
+from sensors.inmp441_sensor import Inmp441Sensor
+from sensors.mpu6050_sensor import Mpu6050Sensor
+from tgbot.alerts import AlertContext, build_alerts, send_data_and_alerts, send_message
+from utils.calibration import load_calibration
+from utils.csv_logger import CsvLogger
+from utils.logger import get_logger
+from utils.network import wait_for_internet
+from utils.thingspeak import ThingSpeakUploader
+from utils.watchdog import Heartbeat
+
+logger = get_logger(__name__)
+
+_shutdown_requested = False
+
+
+def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
+    global _shutdown_requested
+    logger.info("Received signal %s, shutting down gracefully...", signum)
+    _shutdown_requested = True
+
+
+def _build_hive_update_message(sensor: dict, behavior: str) -> str:
+    confidence_str = ""
+    confidence = sensor.get("confidence", 0.0)
+    if confidence and confidence > 0:
+        confidence_str = f"\n├ AI Confidence: `{confidence:.0%}`"
+
+    return f"""
+🐝 *HIVE UPDATE* 🐝
+🕑 *Time:* `{sensor['datestamp']}`
+🔊 *Acoustics*
+├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`{confidence_str}
+└ Behavior: *{behavior}*
+🌡️ *Environment*
+├ Temperature: `{sensor['temperature']:.1f} °C`
+└ Humidity: `{sensor['humidity']:.1f} %`
+⚖️ *Weight*
+└ Current: `{sensor['weight']:.2f} g`
+📈 *Motion (Accel)*
+├ Ax: `{sensor['accel_x']:.2f} g`
+├ Ay: `{sensor['accel_y']:.2f} g`
+└ Az: `{sensor['accel_z']:.2f} g`
+🌀 *Rotation (Gyro)*
+├ Gx: `{sensor['gyro_x']:.1f}`
+├ Gy: `{sensor['gyro_y']:.1f}`
+└ Gz: `{sensor['gyro_z']:.1f}`
+""".strip()
+
+
+def _parse_args() -> tuple[float, str, str]:
+    if len(sys.argv) >= 4:
+        try:
+            return float(sys.argv[1]), sys.argv[2], sys.argv[3]
+        except ValueError:
+            logger.warning("Invalid CLI calibration args, falling back to persisted calibration")
+    cal = load_calibration()
+    return cal.weight_g, cal.owner_name, str(cal.owner_id or "N/A")
+
+
+def main() -> None:
+    missing = validate_secrets()
+    if missing:
+        logger.critical("Missing required secrets: %s — set them in environment or token.md", ", ".join(missing))
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    init_weight, starter_name, starter_id = _parse_args()
+
+    logger.info("Initializing sensors...")
+    hx711 = HX711Sensor(notify=lambda msg: send_message(TELEGRAM_LOG_CHANNEL, msg))
+    mpu6050 = Mpu6050Sensor()
+    dht22 = Dht22Sensor()
+    inmp441 = Inmp441Sensor()
+
+    csv_logger = CsvLogger()
+    thingspeak = ThingSpeakUploader()
+    heartbeat = Heartbeat()
+
+    wait_for_internet(max_wait=30.0)
+
+    # ------------------------------------------------------------------
+    # Calibration: prefer saved calibration (auto-recovery after reboot)
+    # over running the full guided calibration flow on an occupied hive.
+    # ------------------------------------------------------------------
+    owner_id = int(starter_id) if str(starter_id).isdigit() else None
+    saved_cal = load_calibration()
+
+    if saved_cal.scale_ratio != 1.0:
+        # Valid persisted calibration — apply directly (no re-weigh)
+        hx711.apply_saved_calibration()
+        logger.info(
+            "Applied saved calibration: ratio=%.6f, weight=%.2fg (by %s)",
+            saved_cal.scale_ratio, saved_cal.weight_g, saved_cal.owner_name,
+        )
+        send_message(TELEGRAM_LOG_CHANNEL, f"⚖️ *Loaded saved calibration* (ratio `{saved_cal.scale_ratio:.6f}`)")
+    else:
+        # No prior calibration — run the full guided sequence
+        hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
+
+    send_message(TELEGRAM_LOG_CHANNEL, f"🚀 *Started* by {starter_name}")
+    send_message(TELEGRAM_LOG_CHANNEL, "✅ Hive Monitor is online. If you see this, channel posting works.")
+    csv_logger.write_header_if_needed()
+
+    ctx = AlertContext()
+    last_cycle = 0.0
+
+    logger.info("Entering monitor loop (cycle=%.1fs)", MONITOR_CYCLE_SECONDS)
+    try:
+        while not _shutdown_requested:
+            now = time.time()
+            if now - last_cycle >= MONITOR_CYCLE_SECONDS:
+                try:
+                    _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Unhandled error during monitor cycle: %s\n%s", exc, traceback.format_exc())
+                    # Never crash: log, alert, and continue on the next cycle.
+                    send_message(TELEGRAM_LOG_CHANNEL, f"⚠️ *Monitor cycle error (recovered):* `{exc}`")
+                finally:
+                    last_cycle = now
+                    heartbeat.beat()
+            time.sleep(MONITOR_IDLE_SLEEP)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("Monitor stopping")
+        send_message(TELEGRAM_LOG_CHANNEL, "🛑 *Stopped*")
+
+
+def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: AlertContext) -> None:
+    from datetime import datetime
+
+    weight = hx711.read_weight_robust()
+    climate = dht22.read_median()
+    imu = mpu6050.read()
+    acoustic = inmp441.read()
+
+    sensor = {
+        "datestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "weight": round(weight, 2),
+        "temperature": climate.temperature_c,
+        "humidity": climate.humidity_pct,
+        "dominant_freq": round(acoustic.dominant_freq_hz, 2),
+        "accel_x": imu.accel_x, "accel_y": imu.accel_y, "accel_z": imu.accel_z,
+        "gyro_x": imu.gyro_x, "gyro_y": imu.gyro_y, "gyro_z": imu.gyro_z,
+        # AI fields (empty when running in FFT-only mode)
+        "behavior": acoustic.behavior,
+        "confidence": acoustic.confidence,
+    }
+
+    if not acoustic.available:
+        logger.warning("INMP441 microphone unavailable this cycle; frequency reported as 0.0")
+
+    alerts, behavior = build_alerts(sensor, sensor["dominant_freq"], ctx)
+
+    message = _build_hive_update_message(sensor, behavior)
+    send_data_and_alerts(TELEGRAM_LOG_CHANNEL, message, alerts)
+
+    csv_logger.log(sensor, behavior=behavior)
+    thingspeak.upload_all(sensor)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="ai_module/train_model.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ai_module/train_model.py
+=========================
+Standalone training script — run on a **PC** (not on the Pi) to produce
+``bee_acoustic_model.tflite`` from clean demonstration WAV files.
+
+Usage::
+
+    python ai_module/train_model.py \\
+        --normal  path/to/Normal.wav \\
+        --triggered path/to/Triggered.wav \\
+        [--epochs 50] [--output ai_module/bee_acoustic_model.tflite]
+
+The script:
+1. Slices each WAV into 2.0-second chunks.
+2. Applies a 100–800 Hz Butterworth bandpass filter.
+3. Extracts 40 mean MFCCs per chunk.
+4. Trains a lightweight Keras Sequential classifier.
+5. Exports the frozen model to TensorFlow Lite.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from scipy.signal import butter, sosfilt
+
+# ---------------------------------------------------------------------------
+# Constants (mirror config.py values so the training script is self-contained)
+# ---------------------------------------------------------------------------
+SAMPLE_RATE = 44_100
+CHUNK_SECONDS = 2.0
+BAND_LOW_HZ = 100.0
+BAND_HIGH_HZ = 800.0
+N_MFCC = 40
+FILTER_ORDER = 5
+
+# ---------------------------------------------------------------------------
+# Audio helpers
+# ---------------------------------------------------------------------------
+
+def _bandpass(samples: np.ndarray, sr: float) -> np.ndarray:
+    nyquist = sr / 2.0
+    low = max(BAND_LOW_HZ / nyquist, 1e-5)
+    high = min(BAND_HIGH_HZ / nyquist, 1.0 - 1e-5)
+    sos = butter(FILTER_ORDER, [low, high], btype="band", output="sos")
+    return sosfilt(sos, samples).astype(np.float32)
+
+
+def _extract_mfcc(samples: np.ndarray, sr: float) -> np.ndarray:
+    import librosa  # type: ignore[import-untyped]
+    mfccs = librosa.feature.mfcc(y=samples.astype(np.float32), sr=sr, n_mfcc=N_MFCC)
+    mfcc_mean = np.mean(mfccs, axis=1).astype(np.float32)
+    std = np.std(mfcc_mean)
+    if std > 1e-6:
+        mfcc_mean = (mfcc_mean - np.mean(mfcc_mean)) / std
+    return mfcc_mean.astype(np.float32)
+
+
+def load_and_slice(
+    wav_path: str | Path, label: int, chunk_s: float = CHUNK_SECONDS, sr: int = SAMPLE_RATE
+) -> list[tuple[np.ndarray, int]]:
+    """Load a WAV file, slice into ``chunk_s``-second windows, bandpass
+    filter, extract MFCCs, and return a list of ``(features, label)``."""
+    import librosa  # type: ignore[import-untyped]
+
+    audio, actual_sr = librosa.load(str(wav_path), sr=sr, mono=True)
+    chunk_samples = int(chunk_s * actual_sr)
+    stride_samples = int(0.5 * actual_sr)
+    results: list[tuple[np.ndarray, int]] = []
+
+    for start in range(0, len(audio) - chunk_samples + 1, stride_samples):
+        chunk = audio[start : start + chunk_samples]
+        filtered = _bandpass(chunk, actual_sr)
+        mfcc_feat = _extract_mfcc(filtered, actual_sr)
+        results.append((mfcc_feat, label))
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Model definition & training
+# ---------------------------------------------------------------------------
+
+def build_model(input_dim: int = N_MFCC):
+    """Build a lightweight Keras Sequential classifier."""
+    import tensorflow as tf  # type: ignore[import-untyped]
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(input_dim,)),
+        tf.keras.layers.Dense(32, activation="relu"),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(16, activation="relu"),
+        tf.keras.layers.Dense(1, activation="sigmoid"),
+    ])
+    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+
+def train_and_export(
+    normal_wav: str | Path,
+    triggered_wav: str | Path,
+    output_path: str | Path,
+    epochs: int = 50,
+) -> None:
+    import tensorflow as tf  # type: ignore[import-untyped]
+
+    print(f"Loading Normal WAV:    {normal_wav}")
+    normal_data = load_and_slice(normal_wav, label=0)
+    print(f"  → {len(normal_data)} chunks")
+
+    print(f"Loading Triggered WAV: {triggered_wav}")
+    triggered_data = load_and_slice(triggered_wav, label=1)
+    print(f"  → {len(triggered_data)} chunks")
+
+    all_data = normal_data + triggered_data
+    if len(all_data) < 4:
+        print("ERROR: Not enough audio chunks for training. Provide longer WAV files.")
+        sys.exit(1)
+
+    np.random.shuffle(all_data)
+    X = np.array([d[0] for d in all_data], dtype=np.float32)
+    y = np.array([d[1] for d in all_data], dtype=np.float32)
+
+    print(f"\nDataset: {len(X)} samples ({int(np.sum(y == 0))} normal, {int(np.sum(y == 1))} triggered)")
+
+    model = build_model(input_dim=X.shape[1])
+    model.summary()
+
+    history = model.fit(X, y, epochs=epochs, batch_size=8, validation_split=0.2, verbose=1)
+
+    final_acc = history.history["accuracy"][-1]
+    print(f"\nFinal training accuracy: {final_acc:.2%}")
+
+    # ---- Export to TFLite ----
+    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    tflite_model = converter.convert()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(tflite_model)
+    print(f"\n✅ TFLite model exported to: {output_path}")
+    print(f"   Size: {output_path.stat().st_size / 1024:.1f} KB")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    _script_dir = Path(__file__).resolve().parent
+    _default_normal = str(_script_dir / "audio_samples" / "Normal.wav")
+    _default_triggered = str(_script_dir / "audio_samples" / "Triggered.wav")
+
+    parser = argparse.ArgumentParser(
+        description="Train bee acoustic classifier and export to TFLite."
+    )
+    parser.add_argument("--normal", default=_default_normal, help="Path to Normal.wav (label 0)")
+    parser.add_argument("--triggered", default=_default_triggered, help="Path to Triggered.wav (label 1)")
+    parser.add_argument("--epochs", type=int, default=50, help="Training epochs (default: 50)")
+    parser.add_argument(
+        "--output",
+        default=str(_script_dir / "bee_acoustic_model.tflite"),
+        help="Output .tflite path",
+    )
+    args = parser.parse_args()
+
+    for path_arg, name in [(args.normal, "Normal"), (args.triggered, "Triggered")]:
+        if not Path(path_arg).is_file():
+            print(f"ERROR: {name} WAV file not found: {path_arg}")
+            sys.exit(1)
+
+    train_and_export(args.normal, args.triggered, args.output, args.epochs)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path=".gitignore">
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment / secrets — NEVER commit real credentials
+.env
+*.env
+
+# Runtime data (auto-generated by the app)
+data/
+logs/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# pytest
+.pytest_cache/
+
+# Secrets file - NEVER push to git
+token.md
+
+# AI model artifacts (generated by train_model.py)
+ai_module/*.tflite
+</file>
+
+<file path="requirements.txt">
+# Core
+numpy>=1.26,<2.0
+scipy>=1.11
+certifi>=2024.2.2
+requests>=2.31
+psutil>=5.9
+
+# Telegram bot (async v20+ API)
+python-telegram-bot>=20.7,<21.0
+
+# Hardware interfaces
+RPi.GPIO>=0.7.1 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+smbus2>=0.4.3
+hx711>=1.1.2.3
+
+# DHT22 (actively maintained CircuitPython driver + board pin definitions)
+adafruit-circuitpython-dht>=4.0.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+adafruit-blinka>=8.20.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+
+# INMP441 I2S microphone capture (native I2S via PortAudio, no ADC/SPI)
+sounddevice>=0.4.6
+
+# AI acoustic inference & model training (Edge AI module)
+librosa>=0.10
+tflite-runtime>=2.14 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+tensorflow>=2.15 ; platform_machine == "x86_64" or platform_machine == "AMD64"
+</file>
+
 <file path="sensors/inmp441_sensor.py">
 # -*- coding: utf-8 -*-
 """
@@ -2876,6 +3332,7 @@ from config import (
     GYRO_ABS_ALERT,
     MOTION_ACCEL_DELTA,
     MOTION_GYRO_DELTA,
+    TELEGRAM_API_BASE,
     TELEGRAM_BOT_TOKEN,
     WEIGHT_MAX_VALID,
     WEIGHT_SUDDEN_JUMP,
@@ -3017,12 +3474,19 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
 # of its own -- it talks to the Bot API directly over HTTPS so it does
 # not depend on python-telegram-bot's async Updater/Application).
 # ----------------------------------------------------------------------
-def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+def send_message(chat_id: str, text: str, parse_mode: Optional[str] = "Markdown") -> bool:
     """Send a message via raw Bot API HTTPS call with retry/backoff."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    url = f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = _session.post(url, data=payload, timeout=10)
+        if resp.status_code == 400 and parse_mode is not None:
+            # Fallback to plaintext if Markdown entity parsing fails (e.g. usernames with underscores)
+            logger.warning("Markdown syntax error in Telegram message, retrying as raw text...")
+            payload.pop("parse_mode", None)
+            resp = _session.post(url, data=payload, timeout=10)
         if resp.status_code != 200:
             logger.warning("Telegram sendMessage non-200: %s %s", resp.status_code, resp.text[:200])
             return False
@@ -3039,6 +3503,78 @@ def send_channel_log(channel: str, text: str) -> bool:
 def send_data_and_alerts(channel: str, data_message: str, alerts: List[str]) -> bool:
     alert_section = "\n".join(alerts) + "\n\n" if alerts else ""
     return send_message(channel, alert_section + data_message)
+</file>
+
+<file path="tgbot/keyboards.py">
+# -*- coding: utf-8 -*-
+"""
+tgbot/keyboards.py
+====================
+Inline keyboard layouts for the BeeHive Monitor Telegram bot.
+"""
+
+from __future__ import annotations
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from config import TELEGRAM_PUBLIC_CHANNEL_LINK, TELEGRAM_WEB_DASHBOARD
+
+
+def main_menu(is_running: bool) -> InlineKeyboardMarkup:
+    """Primary member command center keyboard."""
+    status_icon = "🟢" if is_running else "🔴"
+    keyboard = [
+        [InlineKeyboardButton("🌐 Open Live Web Dashboard", url=TELEGRAM_WEB_DASHBOARD)],
+        [InlineKeyboardButton(f"{status_icon} Start Hive Monitor", callback_data="start_init_member")],
+        [InlineKeyboardButton("🛑 Stop Monitor", callback_data="stop_script_member")],
+        [InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration")],
+        [
+            InlineKeyboardButton("📄 Check Status", callback_data="status_check"),
+            InlineKeyboardButton("🔗 Join Channel", url=TELEGRAM_PUBLIC_CHANNEL_LINK),
+        ],
+        [
+            InlineKeyboardButton("📊 Hive Data (CSV)", callback_data="download_data_csv"),
+            InlineKeyboardButton("⚙️ Pi Health", callback_data="check_pi_health"),
+        ],
+        [
+            InlineKeyboardButton("🖥️ System Info", callback_data="system_info"),
+            InlineKeyboardButton("⏱️ Uptime", callback_data="uptime_info"),
+        ],
+        [
+            InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings"),
+            InlineKeyboardButton("👥 Manage Admins", callback_data="manage_admins"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def guest_menu() -> InlineKeyboardMarkup:
+    """Public / Guest command center keyboard with read-only access and admin request button."""
+    keyboard = [
+        [InlineKeyboardButton("🌐 Open Live Web Dashboard", url=TELEGRAM_WEB_DASHBOARD)],
+        [
+            InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings"),
+            InlineKeyboardButton("📄 Check Status", callback_data="status_check"),
+        ],
+        [InlineKeyboardButton("🔗 Join Channel", url=TELEGRAM_PUBLIC_CHANNEL_LINK)],
+        [InlineKeyboardButton("🙋 Request Admin Access", callback_data="request_admin_access")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def admin_approval_keyboard(user_id: int, user_name: str) -> InlineKeyboardMarkup:
+    """Inline buttons sent to root admin when a guest requests access."""
+    clean_name = user_name.replace("_", " ")[:20]
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Approve Admin Access", callback_data=f"approve_{user_id}_{clean_name}"),
+            InlineKeyboardButton("❌ Deny", callback_data=f"deny_{user_id}"),
+        ]
+    ])
+
+
+def back_to_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="main_menu")]])
 </file>
 
 <file path="tgbot/commands.py">
@@ -3131,6 +3667,10 @@ def is_member(user_id: int) -> bool:
     return str(user_id) in load_members()
 
 
+def is_approved(user_id: int) -> bool:
+    return user_id == TELEGRAM_AUTHORIZED_USER_ID or is_member(user_id)
+
+
 def _actor(update: Update):
     if update.effective_user:
         return update.effective_user
@@ -3143,11 +3683,11 @@ def restricted_admin(func: Callable) -> Callable:
         user = _actor(update)
         if user is None:
             return
-        if user.id != TELEGRAM_AUTHORIZED_USER_ID:
+        if not is_approved(user.id):
             if update.message:
-                await update.message.reply_text("🛑 Admin only access.")
+                await update.message.reply_text("🛑 Approved Admin access only.")
             elif update.callback_query:
-                await update.callback_query.answer("🛑 Admin only access.", show_alert=True)
+                await update.callback_query.answer("🛑 Approved Admin access only.", show_alert=True)
             return
         return await func(update, context, *a, **kw)
 
@@ -3160,12 +3700,12 @@ def member_required(func: Callable) -> Callable:
         user = _actor(update)
         if user is None:
             return
-        if user.id != TELEGRAM_AUTHORIZED_USER_ID and not is_member(user.id):
+        if not is_approved(user.id):
             if update.message:
-                await update.message.reply_text("🛑 Access Denied. Only approved members can send commands.")
+                await update.message.reply_text("🛑 Access Denied. Approved Admin access required for controls.")
             elif update.callback_query:
                 await update.callback_query.answer(
-                    "🛑 Access Denied. Only approved members can send commands.", show_alert=True
+                    "🛑 Access Denied. Approved Admin access required for controls.", show_alert=True
                 )
             return
         return await func(update, context, *a, **kw)
@@ -3207,17 +3747,27 @@ def _stop_monitor() -> None:
 
 
 # ----------------------------------------------------------------------
-# /start and main menu
+# /start and main menu (Public + Admin modes)
 # ----------------------------------------------------------------------
-@member_required
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = _actor(update)
+    if user is None or not update.message:
+        return
     context.user_data["awaiting_calibration"] = False
     context.user_data["awaiting_calibration_change"] = False
-    await update.message.reply_text(
-        "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
-        reply_markup=keyboards.main_menu(_is_running()),
-        parse_mode=ParseMode.MARKDOWN,
-    )
+
+    if is_approved(user.id):
+        await update.message.reply_text(
+            "*Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+            reply_markup=keyboards.main_menu(_is_running()),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(
+            "*🐝 Smart Hive Monitor — Public Access*\n\nYou have read-only guest access to check live sensor readings and our IoT web dashboard.\nTo unlock full system control and calibration capabilities, tap *Request Admin Access* below.",
+            reply_markup=keyboards.guest_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
 
 @restricted_admin
@@ -3313,9 +3863,11 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     restricted_actions = {
         "start_init_member", "stop_script_member", "change_calibration",
+        "check_pi_health", "system_info", "uptime_info", "download_data_csv",
+        "manage_admins",
     }
-    if action in restricted_actions and uid != TELEGRAM_AUTHORIZED_USER_ID and not is_member(uid):
-        await query.answer("🛑 Access Denied.", show_alert=True)
+    if action in restricted_actions and not is_approved(uid):
+        await query.answer("🛑 Access Denied. Approved Admin status required.", show_alert=True)
         return
 
     if action == "start_init_member":
@@ -3348,11 +3900,95 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode=ParseMode.MARKDOWN,
         )
     elif action == "main_menu":
+        if is_approved(uid):
+            await query.edit_message_text(
+                "*Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+                reply_markup=keyboards.main_menu(_is_running()),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await query.edit_message_text(
+                "*🐝 Smart Hive Monitor — Public Access*\n\nYou have read-only guest access to check live sensor readings and our IoT web dashboard.\nTo unlock full system control and calibration capabilities, tap *Request Admin Access* below.",
+                reply_markup=keyboards.guest_menu(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    elif action == "manage_admins":
+        if not is_approved(uid):
+            await query.answer("🛑 Access Denied.", show_alert=True)
+            return
+        members = load_members()
+        lines = [
+            "👥 *Admin Team & Access Management*\n",
+            f"• *Root Admin ID:* `{TELEGRAM_AUTHORIZED_USER_ID}`\n",
+            "*Approved Admin Members:*"
+        ]
+        if not members:
+            lines.append("_No additional admins approved yet._\n")
+        else:
+            for m_id, m_name in members.items():
+                lines.append(f"• `{m_id}`: {m_name}")
+            lines.append("")
+        lines.extend([
+            "*Manual Management Commands:*",
+            "• Promote user: `/addadmin <user_id> [name]`",
+            "• Revoke rights: `/deladmin <user_id>`",
+            "• View full list: `/admins`\n",
+            "_Tip: Unapproved visitors can tap 'Request Admin Access' in guest mode for immediate 1-tap notification approval!_"
+        ])
         await query.edit_message_text(
-            "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
-            reply_markup=keyboards.main_menu(_is_running()),
+            "\n".join(lines),
+            reply_markup=keyboards.back_to_menu(),
             parse_mode=ParseMode.MARKDOWN,
         )
+    elif action == "request_admin_access":
+        if is_approved(uid):
+            await query.answer("✅ You are already an Approved Admin!", show_alert=True)
+            return
+        user_name = f"{query.from_user.full_name} (@{query.from_user.username or uid})"
+        await query.answer("📩 Your request has been forwarded to the Root Admin!", show_alert=True)
+        try:
+            await context.bot.send_message(
+                chat_id=TELEGRAM_AUTHORIZED_USER_ID,
+                text=f"🔔 *New Admin Access Request*\n\nUser: `{user_name}`\nID: `{uid}`\n\nApprove to grant full system control capabilities?",
+                reply_markup=keyboards.admin_approval_keyboard(uid, user_name),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.error("Failed to forward access request to admin: %s", exc)
+    elif action.startswith("approve_") or action.startswith("deny_"):
+        if uid != TELEGRAM_AUTHORIZED_USER_ID and not is_member(uid):
+            await query.answer("🛑 Only admins can approve or deny requests.", show_alert=True)
+            return
+        parts = action.split("_", 2)
+        cmd_type = parts[0]
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            return
+        if cmd_type == "approve":
+            target_name = parts[2] if len(parts) > 2 else f"User {target_id}"
+            members = load_members()
+            members[str(target_id)] = target_name
+            save_members(members)
+            await query.edit_message_text(f"✅ *Approved Admin Access for {target_name} (`{target_id}`)*", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text="🎉 *Your Admin Access has been APPROVED!*\n\nYou now have full administrative command center capabilities. Type /start to open your admin control panel.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception as exc:
+                logger.warning("Could not send approval confirmation to %s: %s", target_id, exc)
+        elif cmd_type == "deny":
+            await query.edit_message_text(f"❌ *Denied Admin Access for ID `{target_id}`*", parse_mode=ParseMode.MARKDOWN)
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text="❌ *Your request for Admin Access was declined.*",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
 
 
 async def _handle_start_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3565,6 +4201,57 @@ async def set_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.MARKDOWN,
     )
     logger.info("Scale ratio set to %.6f by %s", new_ratio, user_name)
+
+
+# ----------------------------------------------------------------------
+# Admin User Management (/addadmin, /deladmin, /admins)
+# ----------------------------------------------------------------------
+@restricted_admin
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/addadmin <user_id> [name] — manually promote a user to full Admin."""
+    if not update.message or not context.args:
+        await update.message.reply_text("Usage: `/addadmin <user_id> [optional_name]`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid_str = context.args[0]
+    if not uid_str.isdigit():
+        await update.message.reply_text("❌ User ID must be digits.")
+        return
+    name = " ".join(context.args[1:]) if len(context.args) > 1 else f"Admin {uid_str}"
+    members = load_members()
+    members[uid_str] = name
+    save_members(members)
+    await update.message.reply_text(f"✅ User `{uid_str}` ({name}) added to Approved Admins.", parse_mode=ParseMode.MARKDOWN)
+
+
+@restricted_admin
+async def deladmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/deladmin <user_id> — revoke admin rights."""
+    if not update.message or not context.args:
+        await update.message.reply_text("Usage: `/deladmin <user_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+    uid_str = context.args[0]
+    members = load_members()
+    if uid_str in members:
+        removed = members.pop(uid_str)
+        save_members(members)
+        await update.message.reply_text(f"🗑️ Revoked Admin access from `{uid_str}` ({removed}).", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("ℹ️ That User ID is not currently in the approved list.")
+
+
+@restricted_admin
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/admins — display list of approved admin members."""
+    if not update.message:
+        return
+    members = load_members()
+    lines = [f"👑 *Root Admin ID:* `{TELEGRAM_AUTHORIZED_USER_ID}`", "\n*Approved Admin Members:*"]
+    if not members:
+        lines.append("_No additional admins approved yet._")
+    else:
+        for uid, name in members.items():
+            lines.append(f"• `{uid}`: {name}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 </file>
 
 <file path="bot.py">
@@ -3606,6 +4293,7 @@ from telegram.ext import (
 
 from config import (
     MEMBERS_FILE,
+    TELEGRAM_API_BASE,
     TELEGRAM_AUTHORIZED_USER_ID,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CONNECT_TIMEOUT,
@@ -3624,7 +4312,7 @@ logger = get_logger(__name__)
 CALLBACK_PATTERN = (
     "^(start_init_member|stop_script_member|status_check|change_calibration|"
     "download_data_csv|check_pi_health|system_info|uptime_info|"
-    "sensor_readings|main_menu)$"
+    "sensor_readings|main_menu|manage_admins|request_admin_access|approve_.*|deny_.*)$"
 )
 
 
@@ -3694,6 +4382,8 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .base_url(f"{TELEGRAM_API_BASE}/bot")
+        .base_file_url(f"{TELEGRAM_API_BASE}/file/bot")
         .read_timeout(TELEGRAM_READ_TIMEOUT)
         .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
         .build()
@@ -3705,6 +4395,15 @@ def build_application() -> Application:
     )
     application.add_handler(
         CommandHandler("set_ratio", commands.set_ratio, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("addadmin", commands.addadmin, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("deladmin", commands.deladmin, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("admins", commands.list_admins, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(CallbackQueryHandler(commands.manage_script, pattern=CALLBACK_PATTERN))
     application.add_handler(
@@ -3740,6 +4439,352 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+</file>
+
+<file path="instructions.md">
+# BeeHive Monitor — Unified Edge AI & Full Deployment Instructions
+## Raspberry Pi 4 · Debian Bookworm 64-bit (Headless) · Via PuTTY & Edge AI Architecture
+
+> **Version**: NASSCOM Expo 2026 Unified Edition  
+> **Target Hardware**: Raspberry Pi 4 Model B (Debian Bookworm 64-bit) & Google VoiceHAT I2S MEMS  
+> **AI Model**: TFLite MFCC-based binary classifier (Normal vs Triggered Hive Distress)
+
+---
+
+## Table of Contents
+
+1. [Codebase Overview & Folder Structure](#1-codebase-overview--folder-structure)
+2. [Pre-Requisites (on your Windows PC)](#2-pre-requisites-on-your-windows-pc)
+3. [First Boot and PuTTY Connection](#3-first-boot-and-putty-connection)
+4. [Update the System](#4-update-the-system)
+5. [Transfer Project Files to the Pi](#5-transfer-project-files-to-the-pi)
+6. [Create the Python Virtual Environment (venv)](#6-create-the-python-virtual-environment-venv)
+7. [Set Your Secrets & Hardware Audio Configuration](#7-set-your-secrets--hardware-audio-configuration)
+8. [Enable I2C and I2S Hardware Interfaces](#8-enable-i2c-and-i2s-hardware-interfaces)
+9. [Install and Start the systemd Service](#9-install-and-start-the-systemd-service)
+10. [Edge AI Workflow & Training (PC / Pi)](#10-edge-ai-workflow--training-pc--pi)
+11. [AI Inference & Graceful Fallback Behavior](#11-ai-inference--graceful-fallback-behavior)
+12. [Calibration Auto-Recovery & /set_ratio Command](#12-calibration-auto-recovery--set_ratio-command)
+13. [Alert Labels & CSV Logging](#13-alert-labels--csv-logging)
+14. [Useful Day-to-Day Commands](#14-useful-day-to-day-commands)
+15. [Troubleshooting](#15-troubleshooting)
+
+---
+
+## 1. Codebase Overview & Folder Structure
+
+```
+BeeHiveMonitor/
+├── ai_module/                    ← Self-contained Edge AI package
+│   ├── __init__.py
+│   ├── ai_engine.py              ← TFLite inference engine (Pi)
+│   ├── train_model.py            ← Keras training & MFCC sliding window slicing script
+│   ├── bee_acoustic_model.tflite ← Trained TFLite model (git-ignored)
+│   └── audio_samples/            ← Bundled audio test samples
+│       ├── Normal.wav            ← Healthy hive recording (label 0)
+│       └── Triggered.wav         ← Distressed/panic hive recording (label 1)
+├── audio/                        ← Signal processing & audio capture
+│   ├── capture.py                ← INMP441 I2S stereo capture & Left-channel extraction
+│   ├── fft.py                    ← FFT dominant-frequency analyser & spectrum math
+│   └── filters.py                ← Bandpass filtering, windowing, peak noise gate
+├── sensors/                      ← Hardware sensor drivers
+│   ├── inmp441_sensor.py         ← Facade combining I2S capture, Edge AI, and FFT
+│   ├── dht22_sensor.py           ← DHT22 temp & humidity sensor
+│   ├── hx711_sensor.py           ← HX711 load cell weight sensor
+│   └── mpu6050_sensor.py         ← MPU6050 6-axis accelerometer/gyroscope tilt sensor
+├── tgbot/                        ← Telegram Bot API communication
+│   ├── alerts.py                 ← Multi-rule hive alert evaluation & plain-text retry fallback
+│   ├── commands.py               ← /start, status, /set_ratio, calibration handlers
+│   └── keyboards.py              ← Inline keyboards & control menus
+├── utils/                        ← Logging, network retries, watchdog, calibration math
+├── config.py                     ← Central system defaults & environment variable overrides
+├── bot.py                        ← Telegram bot service process
+├── monitor.py                    ← Core polling loop (reads sensors, logs CSV, ThingSpeak)
+├── token.md                      ← systemd Environment= secrets (git-ignored)
+├── requirements.txt              ← Unified platform dependencies (includes TFLite & librosa)
+├── install.sh                    ← One-shot automated setup script
+└── instructions.md               ← THIS FILE (Unified Documentation)
+```
+
+### Hardware Wired to the Pi
+
+| Sensor  | What it measures         | Interface                           |
+|---------|--------------------------|-------------------------------------|
+| HX711   | Hive weight (load cell)  | GPIO 5 (DOUT) / GPIO 6 (SCK)       |
+| DHT22   | Temperature and humidity | GPIO 4                              |
+| MPU6050 | Vibration / tilt         | I2C bus 1 (SDA GPIO2 / SCL GPIO3)  |
+| INMP441 | Bee acoustics (I2S mic)  | GPIO 18/19/20, L/R -> GND, VDD 3.3V|
+
+---
+
+## 2. Pre-Requisites (on your Windows PC)
+
+1. **Install PuTTY**: Download from https://www.putty.org for SSH command access.
+2. **Install WinSCP**: Download from https://winscp.net for dragging and dropping files to the Pi.
+3. **Flash Raspberry Pi OS Bookworm (Lite, 64-bit)** using Raspberry Pi Imager. Configure SSH, username/password (`pi` / custom password), and Wi-Fi credentials in the Advanced Settings gear icon before flashing.
+
+---
+
+## 3. First Boot and PuTTY Connection
+
+1. Open **PuTTY**, enter your Pi's IP address (e.g. `192.168.1.50`) on Port `22` (SSH).
+2. Click **Open**, accept the security fingerprint, and log in.
+
+---
+
+## 4. Update the System
+
+Run these terminal commands one at a time:
+
+```bash
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo apt-get autoremove -y
+```
+
+---
+
+## 5. Transfer Project Files to the Pi
+
+Either clone via Git directly on your Raspberry Pi:
+```bash
+cd ~
+git clone https://github.com/NUTTYX4/Smart-Beehive-Monitoring-and-Alert-System.git BeeHiveMonitor
+cd BeeHiveMonitor
+```
+
+Or drag-and-drop your Windows folder to `/home/pi/BeeHiveMonitor` using **WinSCP**.
+
+---
+
+## 6. Create the Python Virtual Environment (venv)
+
+```bash
+# 1. Install system native compilation and PortAudio header libraries
+sudo apt-get install -y python3 python3-venv python3-pip python3-dev \
+    i2c-tools libatlas-base-dev portaudio19-dev libportaudio2 libasound2-dev git build-essential
+
+# 2. Enter project folder and create virtual environment
+cd ~/BeeHiveMonitor
+python3 -m venv venv
+
+# 3. Activate virtual environment
+source venv/bin/activate
+
+# 4. Upgrade pip and install unified system dependencies
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+> **Note on AI Dependencies**: `requirements.txt` includes smart platform conditionals. On Raspberry Pi ARM architectures (`aarch64`/`armv7l`), it automatically installs lightweight `tflite-runtime` and `librosa`. On desktop computers (`x86_64`), it installs full `tensorflow` for AI model training.
+
+---
+
+## 7. Set Your Secrets & Hardware Audio Configuration
+
+The application never stores real tokens or hardcoded audio overrides in source code. We pass them securely via systemd overrides or a local `token.md` file.
+
+### Create/Edit Systemd Override File
+```bash
+sudo mkdir -p /etc/systemd/system/beehive.service.d
+sudo nano /etc/systemd/system/beehive.service.d/override.conf
+```
+
+### Complete Production Configuration Template (`override.conf` / `token.md`):
+```ini
+[Service]
+# Telegram Credentials
+Environment=BEEHIVE_TELEGRAM_TOKEN=your_real_bot_token_here
+Environment=BEEHIVE_ADMIN_ID=your_numeric_telegram_user_id
+Environment=BEEHIVE_CHANNEL=@YourChannelUsername
+Environment=BEEHIVE_CHANNEL_LINK=https://t.me/YourChannelUsername
+
+# ThingSpeak API Keys
+Environment=BEEHIVE_TS_ENV_KEY=your_thingspeak_env_motion_write_key
+Environment=BEEHIVE_TS_WA_KEY=your_thingspeak_weight_audio_write_key
+
+# INMP441 / Google VoiceHAT Hardware Audio Configuration
+Environment=BEEHIVE_MIC_DEVICE=snd_rpi_googlevoicehat_soundcar
+Environment=BEEHIVE_MIC_SAMPLE_RATE=48000
+Environment=BEEHIVE_MIC_CHANNELS=2
+Environment=BEEHIVE_MIC_DTYPE=float32
+Environment=BEEHIVE_MIC_BLOCK_SIZE=4096
+Environment=BEEHIVE_MIC_CAPTURE_SECONDS=2.0
+Environment=BEEHIVE_FFT_NOISE_GATE=0.01
+```
+Save in nano with `Ctrl+O` -> `Enter`, then exit with `Ctrl+X`.
+
+---
+
+## 8. Enable I2C and I2S Hardware Interfaces
+
+```bash
+cd ~/BeeHiveMonitor
+chmod +x install.sh enable_i2s.sh
+
+# Enable I2C bus for MPU6050 gyroscope/accelerometer
+sudo raspi-config nonint do_i2c 0
+
+# Enable native I2S audio driver for INMP441
+sudo bash ~/BeeHiveMonitor/enable_i2s.sh
+
+# REQUIRED: Reboot to apply device overlays
+sudo reboot
+```
+
+After reconnecting, verify devices:
+* Check microphone card: `arecord -l` (should show `snd_rpi_googlevoicehat_soundcar`).
+* Check I2C sensor grid: `sudo i2cdetect -y 1` (should highlight address `68`).
+
+---
+
+## 9. Install and Start the systemd Service
+
+```bash
+cd ~/BeeHiveMonitor
+sudo ./install.sh
+
+sudo systemctl daemon-reload
+sudo systemctl enable beehive.service
+sudo systemctl restart beehive.service
+sudo systemctl status beehive.service
+```
+You should see `Active: active (running)` in green.
+
+---
+
+## 10. Edge AI Workflow & Training (PC / Pi)
+
+The acoustic AI module converts raw 2.0-second I2S sound clips into **40 Mel-Frequency Cepstral Coefficients (MFCCs)** and analyzes them with a 2D Convolutional Neural Network (CNN) compressed into TensorFlow Lite.
+
+### Training the Model
+You can train directly on your PC or on the Raspberry Pi using the bundled demo files (`Normal.wav` and `Triggered.wav`). The training engine utilizes a **0.5-second sliding window stride** to multiply training samples 4x and applies **feature standardization (zero-mean, unit-variance)**.
+
+```bash
+cd ~/BeeHiveMonitor
+source venv/bin/activate
+python ai_module/train_model.py
+```
+* **Output**: Successfully trains the Keras neural network to ~95%+ accuracy and exports an ultra-lightweight binary model to `ai_module/bee_acoustic_model.tflite` (~12 KB).
+* To use custom WAV files: `python ai_module/train_model.py --normal /path/to/normal.wav --triggered /path/to/panic.wav --epochs 100`
+
+---
+
+## 11. AI Inference & Graceful Fallback Behavior
+
+When `monitor.py` polls sensors every cycle, `inmp441_sensor.py` manages audio analysis with automatic fallback resilience:
+1. **Primary AI Path**: Captures stereo audio, extracts Left channel index `[0]`, verifies amplitude above `BEEHIVE_FFT_NOISE_GATE`, extracts MFCCs, and classifies state via TFLite.
+2. **Legacy FFT Fallback**: Simultaneously computes Fast Fourier Transform dominant frequency (Hz) for ThingSpeak telemetry. If `tflite-runtime` or the `.tflite` model file is ever missing or deleted, the system seamlessly falls back to legacy frequency-band classification without downtime!
+
+---
+
+## 12. Calibration Auto-Recovery & /set_ratio Command
+
+### Auto-Recovery
+On startup, `monitor.py` reads `data/calibration.json`. If a valid `scale_ratio` exists (≠ 1.0), it applies the calibration immediately. **No physical unloading or re-weighing is required** after power outages or routine reboots!
+
+### Telegram Fine-Tuning
+Admins can manually adjust scale sensitivity on live occupied hives without disturbing bees using Telegram:
+```
+/set_ratio -0.069231
+```
+This updates `calibration.json` instantly and takes effect on the next cycle or reboot.
+
+---
+
+## 13. Alert Labels & CSV Logging
+
+### AI Mode (Primary)
+| AI Prediction | Behavior Label | Telegram Alert |
+|---|---|---|
+| Confidence > 0.65 | ⚔️ Triggered / Panic | `⚔️ DANGER: Hive Distress / Panic State Detected! (AI Confidence: 95%)` |
+| Confidence ≤ 0.65 | 🟢 Normal / Active | No alert (normal operational state) |
+| Peak < Noise Gate | ⚪ Silence | No alert (below acoustic threshold) |
+
+### FFT Fallback Mode (Legacy)
+| Dominant Frequency | Behavior Label & Interpretation |
+|---|---|
+| > 450 Hz | ⚔️ Aggressive / Swarming (High defensive buzzing) |
+| 330–450 Hz | 👑 Queen Piping (Virgin queen pre-swarm signal) |
+| 190–329 Hz | 🟢 Normal / Active (Standard foraging hum) |
+| 100–189 Hz | 🆘 Queenless Roar (Low chaotic distress moaning) |
+| 1–99 Hz | 💤 Dormant / Low (Winter dormancy / inactivity) |
+
+### CSV & Telegram Telemetry
+All acoustic classifications, temperatures, weights, and motion deltas are logged sequentially in `data/hive_update.csv`. If any Telegram alert message encounters Markdown syntax formatting conflicts (e.g., usernames with unescaped underscores), `tgbot/alerts.py` automatically catches the HTTP 400 rejection and **retries sending immediately as raw plain-text** so critical alerts are never lost.
+
+---
+
+## 14. Useful Day-to-Day Commands
+
+| Task | Terminal Command |
+|---|---|
+| **Check service status** | `sudo systemctl status beehive.service` |
+| **Restart systemd service** | `sudo systemctl restart beehive.service` |
+| **Stop service** | `sudo systemctl stop beehive.service` |
+| **Watch live service logs** | `journalctl -u beehive.service -f` |
+| **Watch app rotating log** | `tail -f ~/BeeHiveMonitor/logs/beehive.log` |
+| **Check connected I2S mic** | `arecord -l` |
+| **Check connected I2C sensors** | `sudo i2cdetect -y 1` |
+| **Edit secret override config** | `sudo nano /etc/systemd/system/beehive.service.d/override.conf` |
+| **Reload config & restart** | `sudo systemctl daemon-reload && sudo systemctl restart beehive.service` |
+| **Run manual debug monitor** | `source venv/bin/activate && python3 monitor.py 650 "Admin" 12345678` |
+
+---
+
+## 15. Troubleshooting
+
+* **`arecord -l` shows no microphone**: Confirm `/boot/firmware/config.txt` has `dtoverlay=googlevoicehat-soundcard` and reboot.
+* **Dominant frequency returns `0.00 Hz` during testing**: Verify `BEEHIVE_FFT_NOISE_GATE=0.01` is set in your systemd override. If testing quiet synthetic sounds, lower it temporarily to `0.0001`.
+* **PortAudio / Sounddevice library not found**: Re-run `sudo apt-get install portaudio19-dev libportaudio2 libasound2-dev`.
+* **Telegram Bot unresponsive on College / University WiFi**: Many campus enterprise firewalls restrict access to `api.telegram.org`. Follow Section 16 below to route all bot communications through an unblocked Cloudflare reverse proxy.
+
+---
+
+## 16. University Campus & Expo WiFi Firewall Bypass (Cloudflare Workers)
+
+When demonstrating your Raspberry Pi on college campus WiFi or tech competition networks (e.g., NASSCOM, IEEE Expositions), institutional firewalls frequently block Telegram domains (`api.telegram.org`). To guarantee continuous, zero-delay operation across all networks (home WiFi, cellular hotspots, and restricted university firewalls) without modifying any software on the Raspberry Pi, the system natively supports routing through a **Cloudflare Worker Reverse Proxy**.
+
+### 1-Minute Cloudflare Worker Setup:
+1. Log in to your free [Cloudflare Dashboard](https://dash.cloudflare.com/) and go to **Workers & Pages** -> **Create Application** -> **Create Worker**.
+2. Give your worker a clean name (e.g., `hive-proxy` or `smart-beehive`) and click **Deploy**.
+3. Click **Edit Code** and replace the existing script with the following 12 lines of enterprise-grade Reverse Proxy logic:
+
+```javascript
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    url.hostname = "api.telegram.org";
+    const newRequest = new Request(url, request);
+    return fetch(newRequest);
+  },
+};
+```
+
+4. Click **Save and Deploy**. Your Worker will generate an SSL-secured URL, such as: `https://smart-beehive.nithinvinuthan123.workers.dev`.
+
+### Configuring Your Raspberry Pi for Unified Bypass:
+Add your Cloudflare Worker URL to your systemd override configuration file:
+
+```bash
+sudo nano /etc/systemd/system/beehive.service.d/override.conf
+```
+
+Add the following environment line under `[Service]`:
+```ini
+Environment=BEEHIVE_TG_BASE_URL=https://smart-beehive.nithinvinuthan123.workers.dev
+```
+
+Reload and restart the service:
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart beehive.service
+```
+
+### Architectural Advantages of Unified Cloudflare Routing:
+* **Permanent Unified Operation**: You can leave this configuration enabled permanently. Because Cloudflare's tier-1 global edge network fiber routes traffic directly to Telegram, response latency on home WiFi and mobile hotspots is often faster than direct connections.
+* **Zero CPU / Encryption Overhead**: No VPN software, openVPN tunnels, or TOR proxy daemons are needed on the Raspberry Pi.
+* **Firewall Invisible**: College firewall systems treat `*.workers.dev` traffic as standard academic cloud CDN communication, completely immunizing your demonstration from firewall blocks.
+* **Resilient Internet Check**: The system's network health verification probes `www.google.com` rather than Telegram directly, preventing false offline alarms under campus firewall restrictions.
 </file>
 
 <file path="config.py">
@@ -3817,6 +4862,12 @@ TELEGRAM_LOG_CHANNEL: Final[str] = _env("BEEHIVE_CHANNEL", "@MyHiveAlerts")
 TELEGRAM_PUBLIC_CHANNEL_LINK: Final[str] = _env(
     "BEEHIVE_CHANNEL_LINK", "https://t.me/MyHiveAlerts"
 )
+TELEGRAM_WEB_DASHBOARD: Final[str] = _env(
+    "BEEHIVE_WEB_DASHBOARD", "https://NUTTYX4.github.io/Smart-Beehive-Monitoring-and-Alert-System/"
+)
+TELEGRAM_API_BASE: Final[str] = _env(
+    "BEEHIVE_TG_BASE_URL", "https://smart-beehive.nithinvinuthan123.workers.dev"
+).rstrip("/")
 TELEGRAM_READ_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_READ_TIMEOUT", 30)
 TELEGRAM_CONNECT_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_CONNECT_TIMEOUT", 20)
 TELEGRAM_POLL_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_POLL_TIMEOUT", 60)
@@ -3844,19 +4895,19 @@ MPU6050_I2C_BUS: Final[int] = _env_int("BEEHIVE_MPU_I2C_BUS", 1)
 MPU6050_ADDR: Final[int] = _env_int("BEEHIVE_MPU_ADDR", 0x68)
 
 # INMP441 I2S MEMS microphone (native Raspberry Pi I2S, via sounddevice)
-INMP441_SAMPLE_RATE: Final[int] = _env_int("BEEHIVE_MIC_SAMPLE_RATE", 44100)
-INMP441_CHANNELS: Final[int] = _env_int("BEEHIVE_MIC_CHANNELS", 1)
-INMP441_DEVICE: Final[str] = _env("BEEHIVE_MIC_DEVICE", "")  # "" = sounddevice default
+INMP441_SAMPLE_RATE: Final[int] = _env_int("BEEHIVE_MIC_SAMPLE_RATE", 48000)
+INMP441_CHANNELS: Final[int] = _env_int("BEEHIVE_MIC_CHANNELS", 2)
+INMP441_DEVICE: Final[str] = _env("BEEHIVE_MIC_DEVICE", "snd_rpi_googlevoicehat_soundcar")
 INMP441_BLOCK_SIZE: Final[int] = _env_int("BEEHIVE_MIC_BLOCK_SIZE", 4096)
 INMP441_CAPTURE_SECONDS: Final[float] = _env_float("BEEHIVE_MIC_CAPTURE_SECONDS", 2.0)
-INMP441_DTYPE: Final[str] = _env("BEEHIVE_MIC_DTYPE", "int32")
+INMP441_DTYPE: Final[str] = _env("BEEHIVE_MIC_DTYPE", "float32")
 
 # -------------------------------------------------------------------
 # Acoustic analysis
 # -------------------------------------------------------------------
 FFT_BAND_LOW_HZ: Final[float] = _env_float("BEEHIVE_FFT_LOW", 100.0)
 FFT_BAND_HIGH_HZ: Final[float] = _env_float("BEEHIVE_FFT_HIGH", 800.0)
-FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 15.0)
+FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 0.01)
 
 # -------------------------------------------------------------------
 # Alert thresholds
@@ -3940,954 +4991,6 @@ def validate_secrets() -> list:
     if not TELEGRAM_LOG_CHANNEL:
         missing.append("BEEHIVE_CHANNEL")
     return missing
-</file>
-
-<file path="instructions.md">
-# BeeHive Monitor — Full Deployment Instructions
-## Raspberry Pi 4 · Debian Bookworm 64-bit (Headless) · Via PuTTY
-
-> **Read everything in a section before typing any command.**
-> Lines starting with `$` are commands you type in PuTTY.
-> Lines starting with `#` inside code blocks are comments — do NOT type them.
-
----
-
-## Table of Contents
-
-1. [Codebase Overview](#1-codebase-overview)
-2. [Pre-Requisites (on your Windows PC)](#2-pre-requisites-on-your-windows-pc)
-3. [First Boot and PuTTY Connection](#3-first-boot-and-putty-connection)
-4. [Update the System](#4-update-the-system)
-5. [Transfer Project Files to the Pi](#5-transfer-project-files-to-the-pi)
-6. [Create the Python Virtual Environment (venv)](#6-create-the-python-virtual-environment-venv)
-7. [Set Your Secrets (Telegram and ThingSpeak)](#7-set-your-secrets-telegram-and-thingspeak)
-8. [Enable I2C and I2S Hardware Interfaces](#8-enable-i2c-and-i2s-hardware-interfaces)
-9. [Install and Start the systemd Service](#9-install-and-start-the-systemd-service)
-10. [Verify Everything Works](#10-verify-everything-works)
-11. [Running Tests (Optional)](#11-running-tests-optional)
-12. [Manual Debug Run](#12-manual--debug-run)
-13. [Useful Day-to-Day Commands](#13-useful-day-to-day-commands)
-14. [File Reference](#14-file-reference)
-15. [Troubleshooting](#15-troubleshooting)
-
----
-
-## 1. Codebase Overview
-
-```
-BeeHiveMonitor/
-├── monitor.py            <- sensor loop, CSV, ThingSpeak, Telegram posts
-├── bot.py                <- Telegram bot; launches monitor.py as subprocess
-├── config.py             <- ALL config and secrets (override via env vars)
-├── requirements.txt      <- Python dependencies
-├── install.sh            <- one-shot installer (runs steps 6-9 automatically)
-├── enable_i2s.sh         <- adds I2S mic overlay to /boot/firmware/config.txt
-├── services/
-│   └── beehive.service   <- systemd unit template
-├── audio/                <- I2S capture, FFT, bandpass filters
-├── sensors/              <- per-sensor drivers (HX711, DHT22, MPU6050, INMP441)
-├── tgbot/                <- Telegram alerts, commands, keyboards
-├── utils/                <- logging, CSV, ThingSpeak, network, watchdog, calibration
-├── tests/                <- hardware-free pytest suite
-└── logs/                 <- runtime log files (auto-created)
-```
-
-### Hardware wired to the Pi
-
-| Sensor  | What it measures         | Interface                           |
-|---------|--------------------------|-------------------------------------|
-| HX711   | Hive weight (load cell)  | GPIO 5 (DOUT) / GPIO 6 (SCK)       |
-| DHT22   | Temperature and humidity | GPIO 4                              |
-| MPU6050 | Vibration / tilt         | I2C bus 1 (SDA GPIO2 / SCL GPIO3)  |
-| INMP441 | Bee acoustics (I2S mic)  | GPIO 18/19/20, L/R -> GND, VDD 3.3V|
-
-> All GPIO pin numbers can be changed via environment variables in
-> `/etc/systemd/system/beehive.service.d/override.conf` (see section 7).
-
----
-
-## 2. Pre-Requisites (on your Windows PC)
-
-### 2.1 Install PuTTY
-
-Download from https://www.putty.org and install it.
-
-### 2.2 Install WinSCP (file transfer)
-
-Download from https://winscp.net — you will use it to copy the project folder to the Pi.
-
-### 2.3 Flash Raspberry Pi OS Bookworm (Lite, 64-bit)
-
-1. Download **Raspberry Pi Imager**: https://www.raspberrypi.com/software/
-2. Choose OS -> **Raspberry Pi OS (other)** -> **Raspberry Pi OS Lite (64-bit)**
-3. Before writing, click the gear icon and:
-   - Set **hostname**: e.g. `beehive`
-   - Enable **SSH** (password or key)
-   - Set **username / password** (e.g. `pi` / your chosen password)
-   - Set **Wi-Fi** SSID and password (if using Wi-Fi)
-4. Write to SD card -> insert into Pi -> power on.
-
-### 2.4 Find the Pi's IP address
-
-On your router admin page look for `beehive` or use **Advanced IP Scanner**
-(https://www.advanced-ip-scanner.com/).
-
----
-
-## 3. First Boot and PuTTY Connection
-
-1. Open **PuTTY**.
-2. In **Host Name (or IP address)** enter the Pi's IP (e.g. `192.168.1.50`).
-3. **Port**: `22`, **Connection type**: SSH.
-4. Click **Open** -> accept the host key fingerprint -> log in with your username/password.
-
-You should see a prompt like:
-
-```
-pi@beehive:~$
-```
-
----
-
-## 4. Update the System
-
-Run these commands **one at a time** and wait for each to finish:
-
-```bash
-$ sudo apt-get update -y
-$ sudo apt-get upgrade -y
-$ sudo apt-get autoremove -y
-```
-
-> This can take 5-15 minutes on first boot. Do not close PuTTY.
-
----
-
-## 5. Transfer Project Files to the Pi
-
-### Option A — WinSCP (recommended for beginners)
-
-1. Open **WinSCP** -> **New Site**.
-2. **File protocol**: SFTP · **Host name**: Pi's IP · **User name / Password**: same as PuTTY.
-3. Click **Login**.
-4. On the **right** panel navigate to `/home/pi/`.
-5. On the **left** panel navigate to your Windows folder containing `BeeHiveMonitor`.
-6. Drag the entire `BeeHiveMonitor` folder to the right panel.
-7. Wait for the transfer to complete.
-
-### Option B — Git (if the repo is on GitHub)
-
-```bash
-$ cd ~
-$ sudo apt-get install -y git
-$ git clone https://github.com/YOUR_USERNAME/BeeHiveMonitor.git BeeHiveMonitor
-```
-
-Replace the URL with your actual repository URL.
-
-### Verify the transfer
-
-```bash
-$ ls ~/BeeHiveMonitor
-```
-
-You should see: `monitor.py  bot.py  config.py  requirements.txt  install.sh  ...`
-
----
-
-## 6. Create the Python Virtual Environment (venv)
-
-### Step 6.1 — Install system dependencies
-
-```bash
-$ sudo apt-get install -y \
-    python3 python3-venv python3-pip python3-dev \
-    i2c-tools libatlas-base-dev \
-    portaudio19-dev libportaudio2 libasound2-dev \
-    git build-essential
-```
-
-### Step 6.2 — Navigate to the project directory
-
-```bash
-$ cd ~/BeeHiveMonitor
-```
-
-### Step 6.3 — Create the virtual environment
-
-```bash
-$ python3 -m venv venv
-```
-
-This creates a `venv/` folder inside the project. Takes about 30 seconds.
-
-### Step 6.4 — Activate the virtual environment
-
-```bash
-$ source venv/bin/activate
-```
-
-Your prompt changes to:
-
-```
-(venv) pi@beehive:~/BeeHiveMonitor$
-```
-
-> Every time you open a new PuTTY session and want to run the project manually,
-> you must run this activate command again.
-
-### Step 6.5 — Upgrade pip and install requirements
-
-```bash
-$ pip install --upgrade pip setuptools wheel
-$ pip install -r requirements.txt
-```
-
-> This installs numpy, scipy, python-telegram-bot, RPi.GPIO, smbus2, hx711,
-> sounddevice, and all other dependencies. Takes 3-10 minutes.
-> Watch for any red ERROR lines.
-
-### Step 6.6 — Deactivate (when done with manual work)
-
-```bash
-$ deactivate
-```
-
----
-
-## 7. Set Your Secrets (Telegram and ThingSpeak)
-
-> NEVER edit config.py to put in real tokens. Use a systemd override file instead.
-> This keeps secrets out of the source code.
-
-### Step 7.1 — Get your Telegram bot token
-
-1. Open Telegram -> search for **@BotFather**.
-2. Send `/newbot` (or `/revoke` to rotate an existing token).
-3. Follow the prompts -> copy the token (e.g. `123456789:ABCDEFGxyz...`).
-
-### Step 7.2 — Get your Telegram user ID
-
-1. Search for **@userinfobot** in Telegram -> send `/start`.
-2. It replies with your numeric user ID (e.g. `5633775788`).
-
-### Step 7.3 — Set up ThingSpeak channels and get write keys
-
-This project uses **two separate ThingSpeak channels**. You must create both.
-
----
-
-#### Channel 1 — Environment & Motion  (key: `BEEHIVE_TS_ENV_KEY`)
-
-Log in at https://thingspeak.mathworks.com → **New Channel**, name it e.g. `BeeHive - Env & Motion`.
-
-Set the fields **exactly** in this order (the field numbers must match):
-
-| Field # | Name to enter in ThingSpeak | What it contains        |
-|---------|-----------------------------|-------------------------|
-| Field 1 | `Temperature`               | °C from DHT22           |
-| Field 2 | `Humidity`                  | % from DHT22            |
-| Field 3 | `Accel X`                   | g — MPU6050 X-axis      |
-| Field 4 | `Accel Y`                   | g — MPU6050 Y-axis      |
-| Field 5 | `Accel Z`                   | g — MPU6050 Z-axis      |
-| Field 6 | `Gyro X`                    | °/s — MPU6050 X-axis    |
-| Field 7 | `Gyro Y`                    | °/s — MPU6050 Y-axis    |
-| Field 8 | `Gyro Z`                    | °/s — MPU6050 Z-axis    |
-
-Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_ENV_KEY`.
-
----
-
-#### Channel 2 — Weight & Audio  (key: `BEEHIVE_TS_WA_KEY`)
-
-Create a second channel, name it e.g. `BeeHive - Weight & Audio`.
-
-Set the fields **exactly** in this order:
-
-| Field # | Name to enter in ThingSpeak | What it contains                |
-|---------|-----------------------------|---------------------------------|
-| Field 1 | `Weight`                    | grams from HX711 load cell      |
-| Field 3 | `Dominant Frequency`        | Hz — dominant bee sound from INMP441 FFT |
-
-> Field 2 is intentionally skipped — the code uploads to field1 and field3 only.
-
-Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_WA_KEY`.
-
----
-
-### Step 7.4 — Create the systemd override directory
-
-```bash
-$ sudo mkdir -p /etc/systemd/system/beehive.service.d
-```
-
-### Step 7.5 — Write the secrets override file
-
-Open nano to create the file:
-
-```bash
-$ sudo nano /etc/systemd/system/beehive.service.d/override.conf
-```
-
-Inside nano, type exactly this (replace every placeholder value):
-
-```
-[Service]
-Environment=BEEHIVE_TELEGRAM_TOKEN=123456789:YOUR_REAL_BOT_TOKEN_HERE
-Environment=BEEHIVE_ADMIN_ID=YOUR_NUMERIC_TELEGRAM_USER_ID
-Environment=BEEHIVE_CHANNEL=@YourChannelUsername
-Environment=BEEHIVE_CHANNEL_LINK=https://t.me/YourChannelUsername
-Environment=BEEHIVE_TS_ENV_KEY=YOUR_THINGSPEAK_ENV_MOTION_WRITE_KEY
-Environment=BEEHIVE_TS_WA_KEY=YOUR_THINGSPEAK_WEIGHT_AUDIO_WRITE_KEY
-```
-
-To save in nano:
-- Press Ctrl + O then press Enter to confirm the filename
-- Press Ctrl + X to exit
-
-### Step 7.6 — Verify the file was saved
-
-```bash
-$ sudo cat /etc/systemd/system/beehive.service.d/override.conf
-```
-
-You should see your values printed back.
-
----
-
-## 8. Enable I2C and I2S Hardware Interfaces
-
-### Step 8.1 — Make scripts executable
-
-```bash
-$ cd ~/BeeHiveMonitor
-$ chmod +x install.sh enable_i2s.sh
-```
-
-### Step 8.2 — Enable I2C (for MPU6050)
-
-```bash
-$ sudo raspi-config nonint do_i2c 0
-```
-
-Verify I2C is enabled:
-
-```bash
-$ ls /dev/i2c*
-```
-
-You should see `/dev/i2c-1`.
-
-### Step 8.3 — Enable I2S (for INMP441 microphone)
-
-```bash
-$ sudo bash ~/BeeHiveMonitor/enable_i2s.sh
-```
-
-This adds two lines to `/boot/firmware/config.txt`:
-
-```
-dtparam=i2s=on
-dtoverlay=googlevoicehat-soundcard
-```
-
-Verify they were added:
-
-```bash
-$ grep -E "i2s|googlevoicehat" /boot/firmware/config.txt
-```
-
-### Step 8.4 — Reboot (REQUIRED after enabling I2C and I2S)
-
-```bash
-$ sudo reboot
-```
-
-PuTTY will disconnect. Wait 60 seconds, then reconnect via PuTTY.
-
-### Step 8.5 — Verify the microphone is visible
-
-After reconnecting:
-
-```bash
-$ arecord -l
-```
-
-You should see something like:
-
-```
-card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: ...
-```
-
-If you see nothing, refer to section 15 Troubleshooting.
-
-### Step 8.6 — Verify I2C devices are detected
-
-```bash
-$ sudo i2cdetect -y 1
-```
-
-You should see `68` in the grid (MPU6050 at address 0x68).
-
----
-
-## 9. Install and Start the systemd Service
-
-Run the one-shot installer as root:
-
-```bash
-$ cd ~/BeeHiveMonitor
-$ sudo ./install.sh
-```
-
-This script will:
-1. Re-run apt-get update and install any missing system packages
-2. Re-enable I2C / run enable_i2s.sh
-3. Create/update the Python venv and install requirements.txt
-4. Create data/ and logs/ directories
-5. Copy services/beehive.service to /etc/systemd/system/beehive.service (with paths filled in)
-6. Run systemctl daemon-reload, systemctl enable, systemctl restart
-
-### Step 9.1 — Reload systemd to pick up the override file
-
-```bash
-$ sudo systemctl daemon-reload
-```
-
-### Step 9.2 — Enable and start the service
-
-```bash
-$ sudo systemctl enable beehive.service
-$ sudo systemctl start beehive.service
-```
-
-### Step 9.3 — Check the service status
-
-```bash
-$ sudo systemctl status beehive.service
-```
-
-You should see Active: active (running) in green. Press Q to exit.
-
----
-
-## 10. Verify Everything Works
-
-### Step 10.1 — Watch live logs
-
-```bash
-$ journalctl -u beehive.service -f
-```
-
-Press Ctrl + C to stop. Look for lines like:
-
-```
-INFO  bot.py: Bot started, waiting for commands...
-INFO  monitor.py: Cycle complete — weight=X.Xg temp=XX.X°C ...
-```
-
-### Step 10.2 — Watch the application log file
-
-```bash
-$ tail -f ~/BeeHiveMonitor/logs/beehive.log
-```
-
-Press Ctrl + C to stop.
-
-### Step 10.3 — Test the Telegram bot
-
-Open Telegram -> find your bot -> send /start.
-You should receive a reply with the control panel keyboard.
-
-### Step 10.4 — Confirm sensors are reading
-
-From the Telegram bot, press the Status button.
-You should see live sensor values.
-
----
-
-## 11. Running Tests (Optional)
-
-These tests run without hardware attached (everything is mocked):
-
-```bash
-$ cd ~/BeeHiveMonitor
-$ source venv/bin/activate
-$ python -m pytest tests/ -v
-$ deactivate
-```
-
-All tests should show PASSED.
-
----
-
-## 12. Manual / Debug Run
-
-Use this to debug issues without the service running.
-
-### Step 12.1 — Stop the service first
-
-```bash
-$ sudo systemctl stop beehive.service
-```
-
-### Step 12.2 — Activate venv
-
-```bash
-$ cd ~/BeeHiveMonitor
-$ source venv/bin/activate
-```
-
-### Step 12.3 — Run the bot manually
-
-```bash
-$ python3 bot.py
-```
-
-Press Ctrl + C to stop.
-
-### Step 12.4 — Run the monitor directly (sensor debugging)
-
-```bash
-$ python3 monitor.py 650 "Debug User" 123456789
-```
-
-Replace 650 with your calibration weight in grams, and 123456789 with your actual Telegram user ID.
-
-### Step 12.5 — Re-enable the service when done
-
-```bash
-$ deactivate
-$ sudo systemctl start beehive.service
-```
-
----
-
-## 13. Useful Day-to-Day Commands
-
-| Task                           | Command                                                                 |
-|--------------------------------|-------------------------------------------------------------------------|
-| Check service status           | sudo systemctl status beehive.service                                   |
-| Start service                  | sudo systemctl start beehive.service                                    |
-| Stop service                   | sudo systemctl stop beehive.service                                     |
-| Restart service                | sudo systemctl restart beehive.service                                  |
-| Watch live service logs        | journalctl -u beehive.service -f                                        |
-| Watch app log file             | tail -f ~/BeeHiveMonitor/logs/beehive.log                              |
-| Activate venv (manual work)    | source ~/BeeHiveMonitor/venv/bin/activate                              |
-| Deactivate venv                | deactivate                                                              |
-| Update Python packages         | source ~/BeeHiveMonitor/venv/bin/activate && pip install -r ~/BeeHiveMonitor/requirements.txt --upgrade && deactivate |
-| Check I2C devices              | sudo i2cdetect -y 1                                                     |
-| Check microphone               | arecord -l                                                              |
-| Check CPU temperature          | vcgencmd measure_temp                                                   |
-| View data CSV                  | cat ~/BeeHiveMonitor/data/hive_update.csv                              |
-| View calibration               | cat ~/BeeHiveMonitor/data/calibration.json                             |
-| Edit secrets override          | sudo nano /etc/systemd/system/beehive.service.d/override.conf          |
-| Reload after editing secrets   | sudo systemctl daemon-reload && sudo systemctl restart beehive.service  |
-| Reboot Pi                      | sudo reboot                                                             |
-
----
-
-## 14. File Reference
-
-| File / Folder              | Purpose                                                                              |
-|----------------------------|--------------------------------------------------------------------------------------|
-| monitor.py                 | Main sensor loop — reads sensors every 25s, logs CSV, uploads ThingSpeak, alerts     |
-| bot.py                     | Telegram bot — receives commands, launches/stops monitor.py as a child process       |
-| config.py                  | All constants with env-var overrides — never put real secrets here                   |
-| requirements.txt           | Python package list — install inside the venv                                        |
-| install.sh                 | One-shot installer — runs apt, creates venv, installs service                        |
-| enable_i2s.sh              | Adds I2S overlay lines to /boot/firmware/config.txt                                  |
-| services/beehive.service   | systemd unit template (placeholders replaced by install.sh)                          |
-| audio/capture.py           | Records 2s of audio from INMP441 via sounddevice                                     |
-| audio/fft.py               | FFT analysis — extracts dominant frequency in 100-800 Hz bee band                    |
-| audio/filters.py           | Bandpass filter for acoustic signal                                                  |
-| sensors/hx711_sensor.py    | HX711 driver — reads load cell, applies calibration                                  |
-| sensors/dht22_sensor.py    | DHT22 driver — reads temperature and humidity                                        |
-| sensors/mpu6050_sensor.py  | MPU6050 driver — reads accelerometer and gyroscope over I2C                          |
-| sensors/inmp441_sensor.py  | INMP441 driver — delegates to audio/capture.py                                       |
-| tgbot/alerts.py            | Formats and sends threshold-breach alerts to Telegram                                |
-| tgbot/commands.py          | All /start, status, calibration, CSV download handlers                               |
-| tgbot/keyboards.py         | Telegram inline keyboard layouts                                                     |
-| utils/logger.py            | Rotating file and console logger                                                     |
-| utils/csv_logger.py        | Appends sensor readings to data/hive_update.csv                                      |
-| utils/thingspeak.py        | Uploads fields to ThingSpeak channels with rate-limit guard                          |
-| utils/network.py           | Retrying HTTP session with exponential backoff                                       |
-| utils/watchdog.py          | Writes heartbeat file each cycle                                                     |
-| utils/calibration.py       | Loads / saves calibration JSON; guides weighing workflow                              |
-| data/calibration.json      | Saved scale calibration (auto-created, persists across reboots)                      |
-| data/members.json          | Telegram member access list (managed via bot commands)                               |
-| data/hive_update.csv       | Rolling sensor data log                                                              |
-| logs/beehive.log           | Rotating application log (max 5 MB x 5 files)                                       |
-
----
-
-## 15. Troubleshooting
-
-### arecord -l shows no capture devices
-
-```bash
-# Confirm the overlay lines exist
-$ grep -E "i2s|googlevoicehat" /boot/firmware/config.txt
-
-# If missing, re-run and reboot
-$ sudo bash ~/BeeHiveMonitor/enable_i2s.sh
-$ sudo reboot
-```
-
-### i2cdetect -y 1 shows no device at 0x68
-
-- Check SDA -> GPIO2 and SCL -> GPIO3 are firmly connected.
-- Check MPU6050 VCC is 3.3V (not 5V).
-- Re-enable I2C:
-
-```bash
-$ sudo raspi-config nonint do_i2c 0
-$ sudo reboot
-```
-
-### Service fails to start (status shows failed)
-
-```bash
-# View error details
-$ journalctl -u beehive.service -n 50 --no-pager
-```
-
-Common causes:
-- Wrong bot token — re-check override.conf (section 7.5)
-- Import error — pip install -r requirements.txt not run in venv
-- Port conflict — another instance is running, stop it first
-
-### Bot does not reply in Telegram
-
-1. Check the token in override.conf is correct.
-2. Make sure BEEHIVE_ADMIN_ID matches your actual Telegram user ID.
-3. Tail logs for Unauthorized or Conflict errors:
-
-```bash
-$ journalctl -u beehive.service -f
-```
-
-### pip install -r requirements.txt fails
-
-- Ensure libatlas-base-dev and portaudio19-dev are installed (section 6.1).
-- Ensure venv is activated (prompt shows (venv)).
-- For hx711 errors try: pip install hx711==1.1.2.3
-
-### Permission denied on GPIO / I2C / audio (manual run only)
-
-```bash
-$ sudo usermod -aG gpio,i2c,audio,spi pi
-$ newgrp gpio
-```
-
-### After editing override.conf, changes not picked up
-
-```bash
-$ sudo systemctl daemon-reload
-$ sudo systemctl restart beehive.service
-```
-
----
-
-## Quick-Start Summary (after initial setup is complete)
-
-```bash
-# 1. SSH in via PuTTY
-
-# 2. Check the service is running
-sudo systemctl status beehive.service
-
-# 3. If not running, start it
-sudo systemctl start beehive.service
-
-# 4. Watch live logs
-journalctl -u beehive.service -f
-```
-
-That is it. The bot handles everything else from Telegram.
-</file>
-
-<file path="monitor.py">
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-monitor.py
-==========
-Main hive monitoring loop. Reads the HX711 load cell, DHT22, MPU6050,
-and INMP441 (I2S) sensors on a fixed cycle, classifies bee acoustic
-behaviour (via Edge AI when available, FFT fallback otherwise),
-evaluates alert rules, logs to CSV, uploads to ThingSpeak, and posts
-a formatted hive update plus any alerts to the Telegram channel.
-
-Invoked either directly:
-    python3 monitor.py [calibration_weight_g] [starter_name] [starter_id]
-
-or with no arguments, in which case it recovers the last persisted
-calibration automatically (post-reboot recovery).
-"""
-
-from __future__ import annotations
-
-import os
-import signal
-import sys
-import time
-import traceback
-
-import certifi
-
-os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
-
-from config import (
-    DEFAULT_CALIBRATION_WEIGHT_G,
-    MONITOR_CYCLE_SECONDS,
-    MONITOR_IDLE_SLEEP,
-    TELEGRAM_LOG_CHANNEL,
-    validate_secrets,
-)
-from sensors.dht22_sensor import Dht22Sensor
-from sensors.hx711_sensor import HX711Sensor
-from sensors.inmp441_sensor import Inmp441Sensor
-from sensors.mpu6050_sensor import Mpu6050Sensor
-from tgbot.alerts import AlertContext, build_alerts, send_data_and_alerts, send_message
-from utils.calibration import load_calibration
-from utils.csv_logger import CsvLogger
-from utils.logger import get_logger
-from utils.network import wait_for_internet
-from utils.thingspeak import ThingSpeakUploader
-from utils.watchdog import Heartbeat
-
-logger = get_logger(__name__)
-
-_shutdown_requested = False
-
-
-def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
-    global _shutdown_requested
-    logger.info("Received signal %s, shutting down gracefully...", signum)
-    _shutdown_requested = True
-
-
-def _build_hive_update_message(sensor: dict, behavior: str) -> str:
-    confidence_str = ""
-    confidence = sensor.get("confidence", 0.0)
-    if confidence and confidence > 0:
-        confidence_str = f"\n├ AI Confidence: `{confidence:.0%}`"
-
-    return f"""
-🐝 *HIVE UPDATE* 🐝
-🕑 *Time:* `{sensor['datestamp']}`
-🔊 *Acoustics*
-├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`{confidence_str}
-└ Behavior: *{behavior}*
-🌡️ *Environment*
-├ Temperature: `{sensor['temperature']:.1f} °C`
-└ Humidity: `{sensor['humidity']:.1f} %`
-⚖️ *Weight*
-└ Current: `{sensor['weight']:.2f} g`
-📈 *Motion (Accel)*
-├ Ax: `{sensor['accel_x']:.2f} g`
-├ Ay: `{sensor['accel_y']:.2f} g`
-└ Az: `{sensor['accel_z']:.2f} g`
-🌀 *Rotation (Gyro)*
-├ Gx: `{sensor['gyro_x']:.1f}`
-├ Gy: `{sensor['gyro_y']:.1f}`
-└ Gz: `{sensor['gyro_z']:.1f}`
-""".strip()
-
-
-def _parse_args() -> tuple[float, str, str]:
-    if len(sys.argv) >= 4:
-        try:
-            return float(sys.argv[1]), sys.argv[2], sys.argv[3]
-        except ValueError:
-            logger.warning("Invalid CLI calibration args, falling back to persisted calibration")
-    cal = load_calibration()
-    return cal.weight_g, cal.owner_name, str(cal.owner_id or "N/A")
-
-
-def main() -> None:
-    missing = validate_secrets()
-    if missing:
-        logger.critical("Missing required secrets: %s — set them in environment or token.md", ", ".join(missing))
-        raise SystemExit(1)
-
-    signal.signal(signal.SIGTERM, _handle_shutdown)
-    signal.signal(signal.SIGINT, _handle_shutdown)
-
-    init_weight, starter_name, starter_id = _parse_args()
-
-    logger.info("Initializing sensors...")
-    hx711 = HX711Sensor(notify=lambda msg: send_message(TELEGRAM_LOG_CHANNEL, msg))
-    mpu6050 = Mpu6050Sensor()
-    dht22 = Dht22Sensor()
-    inmp441 = Inmp441Sensor()
-
-    csv_logger = CsvLogger()
-    thingspeak = ThingSpeakUploader()
-    heartbeat = Heartbeat()
-
-    wait_for_internet(max_wait=30.0)
-
-    # ------------------------------------------------------------------
-    # Calibration: prefer saved calibration (auto-recovery after reboot)
-    # over running the full guided calibration flow on an occupied hive.
-    # ------------------------------------------------------------------
-    owner_id = int(starter_id) if str(starter_id).isdigit() else None
-    saved_cal = load_calibration()
-
-    if saved_cal.scale_ratio != 1.0:
-        # Valid persisted calibration — apply directly (no re-weigh)
-        hx711.apply_saved_calibration()
-        logger.info(
-            "Applied saved calibration: ratio=%.6f, weight=%.2fg (by %s)",
-            saved_cal.scale_ratio, saved_cal.weight_g, saved_cal.owner_name,
-        )
-        send_message(TELEGRAM_LOG_CHANNEL, f"⚖️ *Loaded saved calibration* (ratio `{saved_cal.scale_ratio:.6f}`)")
-    else:
-        # No prior calibration — run the full guided sequence
-        hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
-
-    send_message(TELEGRAM_LOG_CHANNEL, f"🚀 *Started* by {starter_name}")
-    send_message(TELEGRAM_LOG_CHANNEL, "✅ Hive Monitor is online. If you see this, channel posting works.")
-    csv_logger.write_header_if_needed()
-
-    ctx = AlertContext()
-    last_cycle = 0.0
-
-    logger.info("Entering monitor loop (cycle=%.1fs)", MONITOR_CYCLE_SECONDS)
-    try:
-        while not _shutdown_requested:
-            now = time.time()
-            if now - last_cycle >= MONITOR_CYCLE_SECONDS:
-                try:
-                    _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx)
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Unhandled error during monitor cycle: %s\n%s", exc, traceback.format_exc())
-                    # Never crash: log, alert, and continue on the next cycle.
-                    send_message(TELEGRAM_LOG_CHANNEL, f"⚠️ *Monitor cycle error (recovered):* `{exc}`")
-                finally:
-                    last_cycle = now
-                    heartbeat.beat()
-            time.sleep(MONITOR_IDLE_SLEEP)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        logger.info("Monitor stopping")
-        send_message(TELEGRAM_LOG_CHANNEL, "🛑 *Stopped*")
-
-
-def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: AlertContext) -> None:
-    from datetime import datetime
-
-    weight = hx711.read_weight_robust()
-    climate = dht22.read_median()
-    imu = mpu6050.read()
-    acoustic = inmp441.read()
-
-    sensor = {
-        "datestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "weight": round(weight, 2),
-        "temperature": climate.temperature_c,
-        "humidity": climate.humidity_pct,
-        "dominant_freq": round(acoustic.dominant_freq_hz, 2),
-        "accel_x": imu.accel_x, "accel_y": imu.accel_y, "accel_z": imu.accel_z,
-        "gyro_x": imu.gyro_x, "gyro_y": imu.gyro_y, "gyro_z": imu.gyro_z,
-        # AI fields (empty when running in FFT-only mode)
-        "behavior": acoustic.behavior,
-        "confidence": acoustic.confidence,
-    }
-
-    if not acoustic.available:
-        logger.warning("INMP441 microphone unavailable this cycle; frequency reported as 0.0")
-
-    alerts, behavior = build_alerts(sensor, sensor["dominant_freq"], ctx)
-
-    message = _build_hive_update_message(sensor, behavior)
-    send_data_and_alerts(TELEGRAM_LOG_CHANNEL, message, alerts)
-
-    csv_logger.log(sensor, behavior=behavior)
-    thingspeak.upload_all(sensor)
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
-<file path="requirements.txt">
-# Core
-numpy>=1.26,<2.0
-scipy>=1.11
-certifi>=2024.2.2
-requests>=2.31
-psutil>=5.9
-
-# Telegram bot (async v20+ API)
-python-telegram-bot>=20.7,<21.0
-
-# Hardware interfaces
-RPi.GPIO>=0.7.1 ; platform_machine == "armv7l" or platform_machine == "aarch64"
-smbus2>=0.4.3
-hx711>=1.1.2.3
-
-# DHT22 (actively maintained CircuitPython driver + board pin definitions)
-adafruit-circuitpython-dht>=4.0.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
-adafruit-blinka>=8.20.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
-
-# INMP441 I2S microphone capture (native I2S via PortAudio, no ADC/SPI)
-sounddevice>=0.4.6
-
-# AI acoustic inference (optional — needed only when ai_module/ is active)
-# Full training deps are in ai_module/requirements_ai.txt
-librosa>=0.10
-</file>
-
-<file path=".gitignore">
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Virtual environment
-venv/
-env/
-.venv/
-
-# Environment / secrets — NEVER commit real credentials
-.env
-*.env
-
-# Runtime data (auto-generated by the app)
-data/
-logs/
-
-# OS artefacts
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# pytest
-.pytest_cache/
-
-# Secrets file - NEVER push to git
-token.md
-
-# AI model artifacts (generated by train_model.py)
-ai_module/*.tflite
 </file>
 
 </files>
