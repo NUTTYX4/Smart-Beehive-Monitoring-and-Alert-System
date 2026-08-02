@@ -170,7 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["awaiting_calibration"] = False
     context.user_data["awaiting_calibration_change"] = False
     await update.message.reply_text(
-        "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
+        "*Member Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
         reply_markup=keyboards.main_menu(_is_running()),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -305,7 +305,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     elif action == "main_menu":
         await query.edit_message_text(
-            "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
+            "*Member Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
             reply_markup=keyboards.main_menu(_is_running()),
             parse_mode=ParseMode.MARKDOWN,
         )

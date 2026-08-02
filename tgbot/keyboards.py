@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import TELEGRAM_PUBLIC_CHANNEL_LINK
+from config import TELEGRAM_PUBLIC_CHANNEL_LINK, TELEGRAM_WEB_DASHBOARD
 
 
 def main_menu(is_running: bool) -> InlineKeyboardMarkup:
     """Primary member command center keyboard."""
     status_icon = "🟢" if is_running else "🔴"
     keyboard = [
+        [InlineKeyboardButton("🌐 Open Live Web Dashboard", url=TELEGRAM_WEB_DASHBOARD)],
         [InlineKeyboardButton(f"{status_icon} Start Hive Monitor", callback_data="start_init_member")],
         [InlineKeyboardButton("🛑 Stop Monitor", callback_data="stop_script_member")],
         [InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration")],
