@@ -147,15 +147,19 @@ def train_and_export(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    _script_dir = Path(__file__).resolve().parent
+    _default_normal = str(_script_dir / "audio_samples" / "Normal.wav")
+    _default_triggered = str(_script_dir / "audio_samples" / "Triggered.wav")
+
     parser = argparse.ArgumentParser(
         description="Train bee acoustic classifier and export to TFLite."
     )
-    parser.add_argument("--normal", required=True, help="Path to Normal.wav (label 0)")
-    parser.add_argument("--triggered", required=True, help="Path to Triggered.wav (label 1)")
+    parser.add_argument("--normal", default=_default_normal, help="Path to Normal.wav (label 0)")
+    parser.add_argument("--triggered", default=_default_triggered, help="Path to Triggered.wav (label 1)")
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs (default: 50)")
     parser.add_argument(
         "--output",
-        default=str(Path(__file__).resolve().parent / "bee_acoustic_model.tflite"),
+        default=str(_script_dir / "bee_acoustic_model.tflite"),
         help="Output .tflite path",
     )
     args = parser.parse_args()

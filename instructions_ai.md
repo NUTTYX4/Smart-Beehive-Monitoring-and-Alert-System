@@ -15,7 +15,10 @@ BeeHiveMonitor/
 │   ├── ai_engine.py              ← TFLite inference engine (Pi)
 │   ├── train_model.py            ← Keras training script (PC)
 │   ├── requirements_ai.txt       ← AI-specific dependencies
-│   └── bee_acoustic_model.tflite ← trained model (git-ignored)
+│   ├── bee_acoustic_model.tflite ← trained model (git-ignored)
+│   └── audio_samples/            ← bundled demo WAVs
+│       ├── Normal.wav            ← healthy hive recording (label 0)
+│       └── Triggered.wav         ← distressed hive recording (label 1)
 ├── audio/                        ← legacy FFT pipeline (preserved)
 │   ├── capture.py                ← INMP441 I2S recording
 │   ├── fft.py                    ← FFT dominant-frequency analyser
@@ -156,31 +159,39 @@ source ai_venv/bin/activate  # Linux/Mac
 pip install -r ai_module/requirements_ai.txt
 ```
 
-### Prepare Audio Files
+### Audio Sample Files
 
-Place clean demonstration WAV files in an accessible directory:
-- **`Normal.wav`** — recording of a healthy, calm hive (label 0)
-- **`Triggered.wav`** — recording of a distressed/panic hive (label 1)
+The demo audio files are **bundled in the repository** at:
+- `ai_module/audio_samples/Normal.wav` — healthy, calm hive (label 0)
+- `ai_module/audio_samples/Triggered.wav` — distressed/panic hive (label 1)
 
-These should be mono or stereo, 44100 Hz sample rate, and at least
-10 seconds long for meaningful training (5+ chunks per class).
+These are automatically synced to the Raspberry Pi via `git pull`.
+To use custom recordings, either replace the files in-place or pass
+`--normal` / `--triggered` overrides on the command line.
 
 ### Run Training
 
+With the bundled audio files, just run (no arguments needed):
+
+```bash
+python ai_module/train_model.py
+```
+
+Or with custom files / overrides:
+
 ```bash
 python ai_module/train_model.py \
-    --normal  path/to/Normal.wav \
-    --triggered path/to/Triggered.wav \
-    --epochs 50 \
-    --output ai_module/bee_acoustic_model.tflite
+    --normal  path/to/Custom_Normal.wav \
+    --triggered path/to/Custom_Triggered.wav \
+    --epochs 100
 ```
 
 **Expected output:**
 
 ```
-Loading Normal WAV:    path/to/Normal.wav
+Loading Normal WAV:    .../ai_module/audio_samples/Normal.wav
   → 15 chunks
-Loading Triggered WAV: path/to/Triggered.wav
+Loading Triggered WAV: .../ai_module/audio_samples/Triggered.wav
   → 12 chunks
 
 Dataset: 27 samples (15 normal, 12 triggered)
@@ -198,7 +209,15 @@ Final training accuracy: 96.30%
 
 ### Transfer the Model
 
+Since the audio samples and training script are bundled in the repo,
+you can either train on the Pi directly or train on a PC and copy:
+
 ```bash
+# Option A: Pull the full repo (audio samples included) and train on Pi
+cd ~/BeeHiveMonitor && git pull
+python ai_module/train_model.py
+
+# Option B: Train on PC, copy just the model
 scp ai_module/bee_acoustic_model.tflite pi@<pi-ip>:~/BeeHiveMonitor/ai_module/
 ```
 
