@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🐝 Smart Hive Monitor — Edge AI & IoT Dashboard</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        /* Custom Scrollbar for Tables & Main View */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+        /* Tab Transitions & Animations */
+        .tab-content { display: none; animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .tab-content.active { display: block; }
+        
+        @keyframes fadeIn { 
+            from { opacity: 0; transform: translateY(8px); } 
+            to { opacity: 1; transform: translateY(0); } 
+        }
+
+        /* Pulse animation for live status badge */
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.85; transform: scale(0.98); }
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+
+        /* Table Styling Overrides */
+        td, th { white-space: nowrap; }
+        
+        /* Slider Styling */
+        input[type=range] {
+            -webkit-appearance: none; 
+            background: transparent; 
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 20px;
+            width: 20px;
+            border-radius: 50%;
+            background: #f59e0b; /* Amber-500 */
+            cursor: pointer;
+            margin-top: -7px; 
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+            transition: transform 0.15s ease;
+        }
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            cursor: pointer;
+            background: #334155;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans selection:bg-amber-500 selection:text-slate-950 min-h-screen">
+
+    <!-- Top Navigation Banner -->
+    <header class="border-b border-slate-800/80 bg-slate-900/60 backdrop-blur sticky top-0 z-50 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div class="flex flex-col md:flex-row justify-between items-center gap-4">
+                <div class="flex items-center space-x-3 text-center md:text-left">
+                    <div class="bg-gradient-to-tr from-amber-500 to-yellow-300 p-2.5 rounded-xl text-slate-950 shadow-lg shadow-amber-500/20">
+                        <i class="fas fa-cubes text-2xl animate-bounce-short"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white flex items-center justify-center md:justify-start gap-2">
+                            <span>Smart Hive Monitor</span>
+                            <span class="text-xs uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">v2.0 Edge AI</span>
+                        </h1>
+                        <p class="text-slate-400 text-xs sm:text-sm mt-0.5">Real-Time IoT Telemetry & INMP441 Acoustic Neural Classifier</p>
+                    </div>
+                </div>
+                
+                <!-- Navigation Switch -->
+                <div class="flex bg-slate-950/80 p-1.5 rounded-xl border border-slate-800 shadow-inner">
+                    <button onclick="switchTab('charts')" id="btn-charts" class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 flex items-center gap-2">
+                        <i class="fas fa-chart-area"></i> Live Graphs
+                    </button>
+                    <button onclick="switchTab('tables')" id="btn-tables" class="px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2">
+                        <i class="fas fa-table"></i> Sensor Logs
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        <!-- Live KPI Snapshot Bar -->
+        <section class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <!-- Temperature KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-red-500/10 rounded-full blur-xl group-hover:bg-red-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Temperature</p>
+                    <i class="fas fa-temperature-three-quarters text-red-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-temp" class="text-2xl sm:text-3xl font-extrabold text-white mt-2">-- °C</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-clock text-slate-600"></i> DHT22 Sensor</p>
+            </div>
+
+            <!-- Humidity KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-blue-500/10 rounded-full blur-xl group-hover:bg-blue-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Humidity</p>
+                    <i class="fas fa-droplet text-blue-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-humidity" class="text-2xl sm:text-3xl font-extrabold text-white mt-2">-- %</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-clock text-slate-600"></i> DHT22 Sensor</p>
+            </div>
+
+            <!-- Weight KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-amber-500/10 rounded-full blur-xl group-hover:bg-amber-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Hive Weight</p>
+                    <i class="fas fa-scale-balanced text-amber-400 text-lg"></i>
+                </div>
+                <h3 id="kpi-weight" class="text-2xl sm:text-3xl font-extrabold text-amber-300 mt-2">-- g</h3>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-circle-check text-emerald-500"></i> HX711 Calibrated</p>
+            </div>
+
+            <!-- Acoustic AI Behavior KPI -->
+            <div class="bg-slate-900/80 border border-slate-800/80 rounded-2xl p-5 shadow-lg relative overflow-hidden group hover:border-slate-700 transition">
+                <div class="absolute -right-6 -top-6 w-20 h-20 bg-purple-500/10 rounded-full blur-xl group-hover:bg-purple-500/20 transition"></div>
+                <div class="flex justify-between items-start">
+                    <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Acoustic AI State</p>
+                    <i class="fas fa-microscope text-purple-400 text-lg"></i>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between">
+                    <h3 id="kpi-freq" class="text-2xl font-bold text-purple-300">-- Hz</h3>
+                    <span id="kpi-badge" class="px-2.5 py-0.5 text-xs font-bold rounded-md bg-slate-800 text-slate-300 border border-slate-700 animate-pulse-slow">Standby</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1 flex items-center gap-1"><i class="fas fa-microphone-lines text-purple-400"></i> INMP441 I2S + TFLite</p>
+            </div>
+        </section>
+
+        <!-- Loading / Refresh Toast -->
+        <div id="loading" class="flex items-center justify-center gap-3 py-3 px-6 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 font-semibold mb-6 shadow-md transition-opacity hidden">
+            <i class="fas fa-circle-notch fa-spin text-lg"></i>
+            <span>Synchronizing live hive feeds from ThingSpeak cloud...</span>
+        </div>
+
+        <!-- VIEW 1: CHARTS -->
+        <div id="view-charts" class="tab-content active space-y-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Weight Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span>
+                            <span>Weight Trend (HX711 Load Cell)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 2 : Field 1</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="weightChart"></canvas></div>
+                </div>
+
+                <!-- Acoustic Frequency Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block"></span>
+                            <span>Dominant Bee Buzz Frequency (INMP441)</span>
+                        </h2>
+                        <span class="text-xs text-purple-300 bg-purple-950/50 px-2.5 py-1 rounded-full border border-purple-800 font-mono">100Hz – 800Hz Band</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="freqChart"></canvas></div>
+                </div>
+
+                <!-- Climate Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-rose-400 inline-block"></span>
+                            <span>Hive Climate (Temperature & Humidity)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 1 : Fields 1 & 2</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="climateChart"></canvas></div>
+                </div>
+
+                <!-- Motion Card -->
+                <div class="bg-slate-900 border border-slate-800/90 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-teal-400 inline-block"></span>
+                            <span>Hive Tilt & Vibration (MPU6050 Accel G)</span>
+                        </h2>
+                        <span class="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-full border border-slate-700 font-mono">Channel 1 : Fields 3-5</span>
+                    </div>
+                    <div class="relative h-72 w-full"><canvas id="accelChart"></canvas></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- VIEW 2: TABLES -->
+        <div id="view-tables" class="tab-content space-y-6">
+            
+            <!-- Slider Control -->
+            <div class="bg-slate-900 p-5 rounded-2xl border border-slate-800 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <div class="p-2.5 rounded-xl bg-slate-800 text-amber-400 border border-slate-700">
+                        <i class="fas fa-filter text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-white text-base">Telemetry Data Filter</h3>
+                        <p class="text-xs text-slate-400">Adjust depth of historical rows loaded from cloud logs</p>
+                    </div>
+                </div>
+                <div class="flex items-center w-full sm:w-auto bg-slate-950/80 px-5 py-3 rounded-xl border border-slate-800/90 gap-4">
+                    <label for="rowRange" class="text-sm font-semibold text-slate-300 whitespace-nowrap">Show history:</label>
+                    <input type="range" id="rowRange" min="1" max="25" value="10" step="1" 
+                           class="w-full sm:w-48"
+                           oninput="updateSliderValue(this.value)">
+                    <div class="min-w-[4.5rem] text-right">
+                        <span id="sliderValue" class="text-amber-400 font-extrabold font-mono text-lg">10</span>
+                        <span class="text-xs text-slate-400 font-medium">rows</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4 Tables Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                
+                <!-- 1. DHT22 Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-rose-300 flex items-center gap-2">
+                            <i class="fas fa-thermometer-half text-rose-400"></i> DHT22 Climate Logs
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">GPIO 4</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-6 py-3.5">Timestamp</th>
+                                    <th class="px-6 py-3.5 text-rose-400">Temp (°C)</th>
+                                    <th class="px-6 py-3.5 text-blue-400">Humidity (%)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-dht-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 2. INMP441 Acoustic Table with Edge AI badge -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-purple-300 flex items-center gap-2">
+                            <i class="fas fa-brain text-purple-400"></i> INMP441 Acoustic Neural Logs
+                        </h3>
+                        <span class="text-xs font-semibold text-purple-300 bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800">I2S Digital 48kHz</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-5 py-3.5">Timestamp</th>
+                                    <th class="px-5 py-3.5 text-purple-400">Freq (Hz)</th>
+                                    <th class="px-5 py-3.5">Inferred Acoustic State</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-max-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 3. HX711 Weight Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-amber-300 flex items-center gap-2">
+                            <i class="fas fa-balance-scale text-amber-400"></i> HX711 Scale Telemetry
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">GPIO 5 & 6</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-6 py-3.5">Timestamp</th>
+                                    <th class="px-6 py-3.5 text-amber-400">Weight (Grams)</th>
+                                    <th class="px-6 py-3.5 text-slate-400">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-hx-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 4. MPU6050 Table -->
+                <div class="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl flex flex-col justify-between">
+                    <div class="bg-slate-800/60 px-6 py-4 border-b border-slate-700/80 flex items-center justify-between">
+                        <h3 class="text-base font-bold text-teal-300 flex items-center gap-2">
+                            <i class="fas fa-cubes text-teal-400"></i> MPU6050 Motion & Vibration
+                        </h3>
+                        <span class="text-xs font-semibold text-slate-400">I2C Bus 1 (0x68)</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase font-semibold text-xs tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="px-4 py-3.5">Timestamp</th>
+                                    <th class="px-3 py-3.5 text-rose-400">Ax</th>
+                                    <th class="px-3 py-3.5 text-emerald-400">Ay</th>
+                                    <th class="px-3 py-3.5 text-blue-400">Az (G)</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gx</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gy</th>
+                                    <th class="px-3 py-3.5 text-amber-400">Gz</th>
+                                </tr>
+                            </thead>
+                            <tbody id="table-mpu-body" class="divide-y divide-slate-800/80 font-mono text-xs"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-800/80 mt-16 py-8 text-center text-slate-500 text-xs sm:text-sm bg-slate-900/40">
+        <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <p class="flex items-center gap-2">
+                <span>🐝 Smart Beehive Monitoring & Alert System — NASSCOM 2026 Edition</span>
+            </p>
+            <div class="flex items-center space-x-4 text-xs">
+                <span class="px-2.5 py-1 rounded-md bg-slate-800 text-slate-400 border border-slate-700">Channel 1: 3173934</span>
+                <span class="px-2.5 py-1 rounded-md bg-slate-800 text-slate-400 border border-slate-700">Channel 2: 3175777</span>
+                <a href="https://thingspeak.com" target="_blank" class="text-amber-400 hover:underline font-semibold flex items-center gap-1">ThingSpeak Cloud <i class="fas fa-external-link-alt text-[10px]"></i></a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // --- GLOBAL DATA STORE ---
+        let globalFeeds1 = [];
+        let globalFeeds2 = [];
+        
+        // --- TABS LOGIC ---
+        function switchTab(tabName) {
+            document.getElementById('view-charts').classList.remove('active');
+            document.getElementById('view-tables').classList.remove('active');
+            
+            document.getElementById('btn-charts').className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2";
+            document.getElementById('btn-tables').className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2";
+
+            document.getElementById('view-' + tabName).classList.add('active');
+            document.getElementById('btn-' + tabName).className = "px-5 py-2 rounded-lg text-sm font-semibold transition-all duration-200 bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 flex items-center gap-2";
+        }
+
+        // --- SLIDER LOGIC ---
+        function updateSliderValue(val) {
+            document.getElementById('sliderValue').innerText = val;
+            renderTables(globalFeeds1, globalFeeds2, parseInt(val));
+        }
+
+        // --- BEHAVIOR CLASSIFIER HELPER ---
+        function classifyAcoustics(freq) {
+            const f = parseFloat(freq);
+            if (isNaN(f) || f <= 0) return { label: "⚪ Silence", color: "bg-slate-800 text-slate-400 border-slate-700" };
+            if (f > 450) return { label: "⚔️ Aggressive / Swarming", color: "bg-red-950/80 text-red-300 border-red-700 font-bold" };
+            if (f >= 330 && f <= 450) return { label: "👑 Queen Piping", color: "bg-amber-950/80 text-amber-300 border-amber-600 font-bold" };
+            if (f >= 190 && f < 330) return { label: "🟢 Normal / Active", color: "bg-emerald-950/80 text-emerald-300 border-emerald-700 font-bold" };
+            if (f >= 100 && f < 190) return { label: "🆘 Queenless Roar", color: "bg-rose-950/80 text-rose-300 border-rose-700 font-bold" };
+            if (f > 0 && f < 100) return { label: "💤 Dormant / Low", color: "bg-blue-950/80 text-blue-300 border-blue-700" };
+            return { label: "⚪ Standby", color: "bg-slate-800 text-slate-400 border-slate-700" };
+        }
+
+        // --- DATA FETCHING ---
+        const CH1_URL = "https://api.thingspeak.com/channels/3173934/feeds.json?api_key=U6DLHHKZ2XYGUPPN&results=25";
+        const CH2_URL = "https://api.thingspeak.com/channels/3175777/feeds.json?api_key=X28B8Y2EE94ZX0Z5&results=25";
+
+        Chart.defaults.color = '#94a3b8';
+        Chart.defaults.borderColor = '#1e293b';
+        Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+        let chartInstances = {};
+
+        async function fetchAllData() {
+            const loader = document.getElementById('loading');
+            loader.classList.remove('hidden');
+
+            try {
+                const [res1, res2] = await Promise.all([fetch(CH1_URL), fetch(CH2_URL)]);
+                const data1 = await res1.json();
+                const data2 = await res2.json();
+
+                globalFeeds1 = data1.feeds || [];
+                globalFeeds2 = data2.feeds || [];
+
+                // Update KPI Snapshot Cards with latest data
+                if (globalFeeds1.length > 0) {
+                    const latest1 = globalFeeds1[globalFeeds1.length - 1];
+                    document.getElementById('kpi-temp').innerText = (latest1.field1 || '--') + " °C";
+                    document.getElementById('kpi-humidity').innerText = (latest1.field2 || '--') + " %";
+                }
+                if (globalFeeds2.length > 0) {
+                    const latest2 = globalFeeds2[globalFeeds2.length - 1];
+                    document.getElementById('kpi-weight').innerText = (latest2.field1 ? parseFloat(latest2.field1).toFixed(1) : '--') + " g";
+                    
+                    const freqVal = latest2.field3 || '0.00';
+                    document.getElementById('kpi-freq').innerText = parseFloat(freqVal).toFixed(1) + " Hz";
+                    const status = classifyAcoustics(freqVal);
+                    const badge = document.getElementById('kpi-badge');
+                    badge.innerText = status.label.replace(/^[^\s]+\s/, ''); // clean emoji for compact badge
+                    badge.className = `px-2.5 py-1 text-xs rounded-md border ${status.color}`;
+                }
+
+                updateCharts(globalFeeds1, globalFeeds2);
+                
+                const currentLimit = document.getElementById('rowRange').value;
+                renderTables(globalFeeds1, globalFeeds2, parseInt(currentLimit));
+
+            } catch (err) {
+                console.error("Error fetching data:", err);
+            } finally {
+                loader.classList.add('hidden');
+            }
+        }
+
+        // --- TABLE RENDERER ---
+        function renderTables(feeds1, feeds2, limit) {
+            const dhtBody = document.getElementById('table-dht-body');
+            const hxBody = document.getElementById('table-hx-body');
+            const maxBody = document.getElementById('table-max-body');
+            const mpuBody = document.getElementById('table-mpu-body');
+            
+            dhtBody.innerHTML = '';
+            hxBody.innerHTML = '';
+            maxBody.innerHTML = '';
+            mpuBody.innerHTML = '';
+
+            const slice1 = [...feeds1].reverse().slice(0, limit);
+            const slice2 = [...feeds2].reverse().slice(0, limit);
+
+            // 1. DHT22 (Channel 1: Field 1 & 2)
+            slice1.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-6 py-3 text-slate-400">${date}</td>
+                        <td class="px-6 py-3 font-bold text-rose-300 text-sm">${f.field1 || '-'} °C</td>
+                        <td class="px-6 py-3 font-bold text-blue-300 text-sm">${f.field2 || '-'} %</td>
+                    </tr>`;
+                dhtBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 2. INMP441 Acoustic AI (Channel 2: Field 3)
+            slice2.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const freq = f.field3 ? parseFloat(f.field3).toFixed(1) + ' Hz' : '-';
+                const classification = classifyAcoustics(f.field3);
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-5 py-3 text-slate-400">${date}</td>
+                        <td class="px-5 py-3 font-bold text-purple-300 text-sm">${freq}</td>
+                        <td class="px-5 py-3"><span class="px-2.5 py-1 rounded border text-xs ${classification.color}">${classification.label}</span></td>
+                    </tr>`;
+                maxBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 3. HX711 (Channel 2: Field 1)
+            slice2.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {month:'short', day:'numeric', hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const weight = f.field1 ? parseFloat(f.field1).toFixed(2) : null;
+                const statusBadge = weight !== null ? 
+                    (weight < 0 ? '<span class="text-red-400">Check Zero</span>' : '<span class="text-emerald-400">Nominal</span>') : '-';
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-6 py-3 text-slate-400">${date}</td>
+                        <td class="px-6 py-3 font-bold text-amber-300 text-sm">${weight !== null ? weight + ' g' : '-'}</td>
+                        <td class="px-6 py-3 font-sans text-xs">${statusBadge}</td>
+                    </tr>`;
+                hxBody.insertAdjacentHTML('beforeend', row);
+            });
+
+            // 4. MPU6050 (Channel 1: Fields 3,4,5,6,7,8)
+            slice1.forEach(f => {
+                const date = new Date(f.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                const row = `
+                    <tr class="hover:bg-slate-800/70 transition">
+                        <td class="px-4 py-3 text-slate-400 text-[11px]">${date}</td>
+                        <td class="px-3 py-3 text-rose-300">${f.field3 || '-'}</td>
+                        <td class="px-3 py-3 text-emerald-300">${f.field4 || '-'}</td>
+                        <td class="px-3 py-3 font-bold text-blue-300">${f.field5 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field6 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field7 || '-'}</td>
+                        <td class="px-3 py-3 text-amber-300/80">${f.field8 || '-'}</td>
+                    </tr>`;
+                mpuBody.insertAdjacentHTML('beforeend', row);
+            });
+        }
+
+        // --- CHART RENDERER ---
+        function formatTime(ts) {
+            return new Date(ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second: '2-digit'});
+        }
+
+        function updateCharts(feeds1, feeds2) {
+            const labels1 = feeds1.map(f => formatTime(f.created_at));
+            const labels2 = feeds2.map(f => formatTime(f.created_at));
+
+            renderChart('weightChart', labels2, [{
+                label: 'Weight (Grams)',
+                data: feeds2.map(f => f.field1),
+                borderColor: '#f59e0b',
+                backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                borderWidth: 2.5,
+                fill: true, tension: 0.35, pointRadius: 3, pointHoverRadius: 6
+            }]);
+
+            renderChart('freqChart', labels2, [{
+                label: 'Dominant Frequency (Hz)',
+                data: feeds2.map(f => f.field3),
+                borderColor: '#c084fc',
+                backgroundColor: 'rgba(192, 132, 252, 0.12)',
+                borderWidth: 2.5,
+                fill: true, tension: 0.35, pointRadius: 3, pointHoverRadius: 6
+            }]);
+
+            renderChart('climateChart', labels1, [
+                { label: 'Temp (°C)', data: feeds1.map(f => f.field1), borderColor: '#fb7185', borderWidth: 2.5, yAxisID: 'y', tension: 0.3, pointRadius: 2 },
+                { label: 'Humidity (%)', data: feeds1.map(f => f.field2), borderColor: '#60a5fa', borderWidth: 2.5, yAxisID: 'y1', tension: 0.3, pointRadius: 2 }
+            ]);
+
+            renderChart('accelChart', labels1, [
+                { label: 'Accel X', data: feeds1.map(f => f.field3), borderColor: '#fb7185', pointRadius: 1, borderWidth: 2, tension: 0.2 },
+                { label: 'Accel Y', data: feeds1.map(f => f.field4), borderColor: '#34d399', pointRadius: 1, borderWidth: 2, tension: 0.2 },
+                { label: 'Accel Z (G)', data: feeds1.map(f => f.field5), borderColor: '#60a5fa', pointRadius: 2, borderWidth: 2.5, tension: 0.2 }
+            ]);
+        }
+
+        function renderChart(canvasId, labels, datasets) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            const scales = { 
+                x: { grid: { color: 'rgba(51, 65, 85, 0.4)' }, ticks: { font: { size: 11 } } }, 
+                y: { grid: { color: 'rgba(51, 65, 85, 0.4)' }, ticks: { font: { size: 11 } } } 
+            };
+            if(canvasId === 'climateChart') {
+                scales.y = { type: 'linear', display: true, position: 'left', grid: { color: 'rgba(51, 65, 85, 0.4)' }, title: { display: true, text: 'Temp (°C)', color: '#fb7185' } };
+                scales.y1 = { type: 'linear', display: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Humidity (%)', color: '#60a5fa' } };
+            }
+            if (chartInstances[canvasId]) {
+                chartInstances[canvasId].data.labels = labels;
+                chartInstances[canvasId].data.datasets = datasets;
+                chartInstances[canvasId].update('none');
+            } else {
+                chartInstances[canvasId] = new Chart(ctx, {
+                    type: 'line', data: { labels, datasets },
+                    options: { 
+                        responsive: true, 
+                        maintainAspectRatio: false, 
+                        interaction: { mode: 'index', intersect: false }, 
+                        scales: scales, 
+                        plugins: { 
+                            legend: { labels: { color: '#e2e8f0', usePointStyle: true, boxWidth: 8 } },
+                            tooltip: { backgroundColor: 'rgba(15, 23, 42, 0.9)', titleColor: '#f8fafc', bodyColor: '#cbd5e1', borderColor: '#334155', borderWidth: 1 }
+                        } 
+                    }
+                });
+            }
+        }
+
+        // Initial launch & poller
+        fetchAllData();
+        setInterval(fetchAllData, 15000);
+    </script>
+</body>
+</html>
