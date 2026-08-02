@@ -66,10 +66,8 @@ APP_LOG_FILE: Final[Path] = LOG_DIR / "beehive.log"
 # -------------------------------------------------------------------
 # Telegram
 # -------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN: Final[str] = _env(
-    "BEEHIVE_TELEGRAM_TOKEN", "8280400805:AAFY5aIJ9jrPUi6G4YhwhUbXbDPi1EMMQDc"
-)
-TELEGRAM_AUTHORIZED_USER_ID: Final[int] = _env_int("BEEHIVE_ADMIN_ID", 5633775788)
+TELEGRAM_BOT_TOKEN: Final[str] = _env("BEEHIVE_TELEGRAM_TOKEN", "")
+TELEGRAM_AUTHORIZED_USER_ID: Final[int] = _env_int("BEEHIVE_ADMIN_ID", 0)
 TELEGRAM_LOG_CHANNEL: Final[str] = _env("BEEHIVE_CHANNEL", "@MyHiveAlerts")
 TELEGRAM_PUBLIC_CHANNEL_LINK: Final[str] = _env(
     "BEEHIVE_CHANNEL_LINK", "https://t.me/MyHiveAlerts"
@@ -82,8 +80,8 @@ TELEGRAM_POLL_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_POLL_TIMEOUT", 60)
 # ThingSpeak
 # -------------------------------------------------------------------
 THINGSPEAK_URL: Final[str] = _env("BEEHIVE_TS_URL", "https://api.thingspeak.com/update")
-THINGSPEAK_ENV_MOTION_API_KEY: Final[str] = _env("BEEHIVE_TS_ENV_KEY", "5YCLLHKETJNYW9SL")
-THINGSPEAK_WEIGHT_AUDIO_API_KEY: Final[str] = _env("BEEHIVE_TS_WA_KEY", "4LFS7NGH9THTXTL6")
+THINGSPEAK_ENV_MOTION_API_KEY: Final[str] = _env("BEEHIVE_TS_ENV_KEY", "")
+THINGSPEAK_WEIGHT_AUDIO_API_KEY: Final[str] = _env("BEEHIVE_TS_WA_KEY", "")
 THINGSPEAK_MIN_INTERVAL_S: Final[float] = _env_float("BEEHIVE_TS_MIN_INTERVAL", 15.0)
 THINGSPEAK_RETRY_TOTAL: Final[int] = _env_int("BEEHIVE_TS_RETRY_TOTAL", 4)
 THINGSPEAK_RETRY_BACKOFF: Final[float] = _env_float("BEEHIVE_TS_RETRY_BACKOFF", 1.5)
@@ -175,3 +173,25 @@ LOG_BACKUP_COUNT: Final[int] = _env_int("BEEHIVE_LOG_BACKUP_COUNT", 5)
 # -------------------------------------------------------------------
 MONITOR_SCRIPT: Final[Path] = BASE_DIR / "monitor.py"
 PYTHON_EXECUTABLE: Final[str] = _env("BEEHIVE_PYTHON", "python3")
+
+# -------------------------------------------------------------------
+# AI module
+# -------------------------------------------------------------------
+AI_MODEL_PATH: Final[Path] = BASE_DIR / "ai_module" / "bee_acoustic_model.tflite"
+AI_CONFIDENCE_THRESHOLD: Final[float] = _env_float("BEEHIVE_AI_THRESHOLD", 0.65)
+AI_MFCC_COEFFICIENTS: Final[int] = _env_int("BEEHIVE_AI_N_MFCC", 40)
+
+
+# -------------------------------------------------------------------
+# Startup validation
+# -------------------------------------------------------------------
+def validate_secrets() -> list:
+    """Return a list of missing required secrets."""
+    missing = []
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("BEEHIVE_TELEGRAM_TOKEN")
+    if TELEGRAM_AUTHORIZED_USER_ID == 0:
+        missing.append("BEEHIVE_ADMIN_ID")
+    if not TELEGRAM_LOG_CHANNEL:
+        missing.append("BEEHIVE_CHANNEL")
+    return missing

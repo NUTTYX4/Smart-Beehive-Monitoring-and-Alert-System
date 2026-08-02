@@ -42,6 +42,7 @@ from config import (
     TELEGRAM_LOG_CHANNEL,
     TELEGRAM_POLL_TIMEOUT,
     TELEGRAM_READ_TIMEOUT,
+    validate_secrets,
 )
 from tgbot import commands
 from tgbot.alerts import send_message
@@ -132,6 +133,9 @@ def build_application() -> Application:
     application.add_handler(
         CommandHandler("channeltest", commands.channeltest, filters=filters.ChatType.PRIVATE)
     )
+    application.add_handler(
+        CommandHandler("set_ratio", commands.set_ratio, filters=filters.ChatType.PRIVATE)
+    )
     application.add_handler(CallbackQueryHandler(commands.manage_script, pattern=CALLBACK_PATTERN))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, commands.handle_message)
@@ -141,6 +145,11 @@ def build_application() -> Application:
 
 
 def main() -> None:
+    missing = validate_secrets()
+    if missing:
+        logger.critical("Missing required secrets: %s — set them in environment or token.md", ", ".join(missing))
+        raise SystemExit(1)
+
     logger.info("Starting BeeHive Monitor Telegram bot")
 
     if not is_internet_reachable():

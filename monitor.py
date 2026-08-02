@@ -5,9 +5,9 @@ monitor.py
 ==========
 Main hive monitoring loop. Reads the HX711 load cell, DHT22, MPU6050,
 and INMP441 (I2S) sensors on a fixed cycle, classifies bee acoustic
-behaviour, evaluates alert rules, logs to CSV, uploads to ThingSpeak,
-and posts a formatted hive update plus any alerts to the Telegram
-channel.
+behaviour (via Edge AI when available, FFT fallback otherwise),
+evaluates alert rules, logs to CSV, uploads to ThingSpeak, and posts
+a formatted hive update plus any alerts to the Telegram channel.
 
 Invoked either directly:
     python3 monitor.py [calibration_weight_g] [starter_name] [starter_id]
@@ -34,6 +34,7 @@ from config import (
     MONITOR_CYCLE_SECONDS,
     MONITOR_IDLE_SLEEP,
     TELEGRAM_LOG_CHANNEL,
+    validate_secrets,
 )
 from sensors.dht22_sensor import Dht22Sensor
 from sensors.hx711_sensor import HX711Sensor
@@ -59,11 +60,16 @@ def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
 
 
 def _build_hive_update_message(sensor: dict, behavior: str) -> str:
+    confidence_str = ""
+    confidence = sensor.get("confidence", 0.0)
+    if confidence and confidence > 0:
+        confidence_str = f"\n├ AI Confidence: `{confidence:.0%}`"
+
     return f"""
 🐝 *HIVE UPDATE* 🐝
 🕑 *Time:* `{sensor['datestamp']}`
 🔊 *Acoustics*
-├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`
+├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`{confidence_str}
 └ Behavior: *{behavior}*
 🌡️ *Environment*
 ├ Temperature: `{sensor['temperature']:.1f} °C`
@@ -92,6 +98,11 @@ def _parse_args() -> tuple[float, str, str]:
 
 
 def main() -> None:
+    missing = validate_secrets()
+    if missing:
+        logger.critical("Missing required secrets: %s — set them in environment or token.md", ", ".join(missing))
+        raise SystemExit(1)
+
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
 
@@ -109,8 +120,24 @@ def main() -> None:
 
     wait_for_internet(max_wait=30.0)
 
+    # ------------------------------------------------------------------
+    # Calibration: prefer saved calibration (auto-recovery after reboot)
+    # over running the full guided calibration flow on an occupied hive.
+    # ------------------------------------------------------------------
     owner_id = int(starter_id) if str(starter_id).isdigit() else None
-    hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
+    saved_cal = load_calibration()
+
+    if saved_cal.scale_ratio != 1.0:
+        # Valid persisted calibration — apply directly (no re-weigh)
+        hx711.apply_saved_calibration()
+        logger.info(
+            "Applied saved calibration: ratio=%.6f, weight=%.2fg (by %s)",
+            saved_cal.scale_ratio, saved_cal.weight_g, saved_cal.owner_name,
+        )
+        send_message(TELEGRAM_LOG_CHANNEL, f"⚖️ *Loaded saved calibration* (ratio `{saved_cal.scale_ratio:.6f}`)")
+    else:
+        # No prior calibration — run the full guided sequence
+        hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
 
     send_message(TELEGRAM_LOG_CHANNEL, f"🚀 *Started* by {starter_name}")
     send_message(TELEGRAM_LOG_CHANNEL, "✅ Hive Monitor is online. If you see this, channel posting works.")
@@ -157,6 +184,9 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: Aler
         "dominant_freq": round(acoustic.dominant_freq_hz, 2),
         "accel_x": imu.accel_x, "accel_y": imu.accel_y, "accel_z": imu.accel_z,
         "gyro_x": imu.gyro_x, "gyro_y": imu.gyro_y, "gyro_z": imu.gyro_z,
+        # AI fields (empty when running in FFT-only mode)
+        "behavior": acoustic.behavior,
+        "confidence": acoustic.confidence,
     }
 
     if not acoustic.available:

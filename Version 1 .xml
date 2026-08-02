@@ -1,0 +1,3904 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files and files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: **/*
+- Files matching these patterns are excluded: venv/**, data/**, logs/**, token.md, **/__pycache__/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+audio/
+  __init__.py
+  capture.py
+  fft.py
+  filters.py
+sensors/
+  __init__.py
+  dht22_sensor.py
+  hx711_sensor.py
+  inmp441_sensor.py
+  mpu6050_sensor.py
+services/
+  beehive.service
+tests/
+  __init__.py
+  test_dht22.py
+  test_hx711.py
+  test_inmp441.py
+  test_mpu6050.py
+tgbot/
+  __init__.py
+  alerts.py
+  commands.py
+  keyboards.py
+utils/
+  __init__.py
+  calibration.py
+  csv_logger.py
+  logger.py
+  network.py
+  thingspeak.py
+  watchdog.py
+.env.example
+.gitignore
+bot.py
+config.py
+enable_i2s.sh
+install.sh
+instructions.md
+monitor.py
+README.md
+requirements.txt
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="audio/__init__.py">
+"""Audio subpackage: I2S capture, filtering, and FFT analysis for the INMP441 microphone."""
+</file>
+
+<file path="audio/capture.py">
+# -*- coding: utf-8 -*-
+"""
+audio/capture.py
+=================
+Continuous audio capture from the INMP441 I2S MEMS microphone via the
+Raspberry Pi's native I2S peripheral, exposed to Python through
+`sounddevice` (PortAudio). No SPI/ADC hardware (MCP3008, TL072,
+ADS1115) is involved -- the INMP441 outputs digital I2S data directly.
+
+Requires `enable_i2s.sh` to have configured `dtoverlay=googlevoicehat-soundcard`
+(or an equivalent I2S microphone overlay) in `/boot/firmware/config.txt`
+and the device to appear in `arecord -l` / `sounddevice.query_devices()`.
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Optional
+
+import numpy as np
+
+try:
+    import sounddevice as sd
+except (ImportError, OSError) as exc:
+    # ImportError: the `sounddevice` package itself isn't installed.
+    # OSError: the package is installed but PortAudio's shared library
+    # is missing/unreachable on this system.
+    sd = None  # type: ignore[assignment]
+    _IMPORT_ERROR: Optional[Exception] = exc
+else:
+    _IMPORT_ERROR = None
+
+from config import (
+    INMP441_BLOCK_SIZE,
+    INMP441_CAPTURE_SECONDS,
+    INMP441_CHANNELS,
+    INMP441_DEVICE,
+    INMP441_DTYPE,
+    INMP441_SAMPLE_RATE,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class MicrophoneUnavailableError(RuntimeError):
+    """Raised when the INMP441 / I2S audio backend cannot be reached."""
+
+
+class Inmp441Capture:
+    """Thread-safe wrapper around a `sounddevice` input stream for the
+    INMP441 I2S microphone, providing simple blocking captures that the
+    monitor loop can call once per cycle without managing PortAudio
+    state itself."""
+
+    def __init__(
+        self,
+        sample_rate: int = INMP441_SAMPLE_RATE,
+        channels: int = INMP441_CHANNELS,
+        device: str = INMP441_DEVICE,
+        dtype: str = INMP441_DTYPE,
+        block_size: int = INMP441_BLOCK_SIZE,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.device = device or None
+        self.dtype = dtype
+        self.block_size = block_size
+        self._lock = threading.Lock()
+        self._last_error: Optional[str] = None
+
+    def _ensure_backend(self) -> None:
+        if sd is None:
+            raise MicrophoneUnavailableError(
+                f"sounddevice/PortAudio unavailable: {_IMPORT_ERROR}"
+            )
+
+    def is_available(self) -> bool:
+        """Best-effort check that the I2S microphone can be opened."""
+        try:
+            self._ensure_backend()
+            with self._lock:
+                sd.check_input_settings(
+                    device=self.device,
+                    channels=self.channels,
+                    samplerate=self.sample_rate,
+                    dtype=self.dtype,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
+            logger.warning("INMP441 microphone unavailable: %s", exc)
+            return False
+
+    def capture(self, duration_s: float = INMP441_CAPTURE_SECONDS) -> np.ndarray:
+        """Blocking capture of `duration_s` seconds of mono float64 audio,
+        normalized to roughly [-1, 1]. Raises MicrophoneUnavailableError
+        on failure so callers can decide how to degrade gracefully."""
+        self._ensure_backend()
+        frames = int(duration_s * self.sample_rate)
+        with self._lock:
+            try:
+                recording = sd.rec(
+                    frames,
+                    samplerate=self.sample_rate,
+                    channels=self.channels,
+                    dtype=self.dtype,
+                    device=self.device,
+                    blocking=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = str(exc)
+                raise MicrophoneUnavailableError(f"INMP441 capture failed: {exc}") from exc
+
+        audio = np.asarray(recording, dtype=np.float64)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)  # downmix to mono
+
+        # Normalize by dtype's full-scale range so gain is consistent
+        # regardless of the configured sample format.
+        if self.dtype == "int32":
+            audio /= float(2**31)
+        elif self.dtype == "int16":
+            audio /= float(2**15)
+        # float32/float64 streams are already roughly in [-1, 1].
+
+        return audio
+
+    @property
+    def last_error(self) -> Optional[str]:
+        return self._last_error
+</file>
+
+<file path="audio/fft.py">
+# -*- coding: utf-8 -*-
+"""
+audio/fft.py
+=============
+FFT-based dominant frequency detection for bee acoustic monitoring,
+using SciPy's real FFT and NumPy for peak detection within the bee
+acoustic band (default 100-800 Hz, configurable in config.py).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+from scipy.fft import rfft, rfftfreq
+
+from audio.filters import condition_signal, is_silent
+from config import FFT_BAND_HIGH_HZ, FFT_BAND_LOW_HZ, FFT_NOISE_GATE
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class FrequencyResult:
+    dominant_freq_hz: float
+    sample_rate_hz: float
+    is_silent: bool
+    peak_magnitude: float
+
+
+def analyze(
+    samples: np.ndarray,
+    sample_rate: float,
+    band_low: float = FFT_BAND_LOW_HZ,
+    band_high: float = FFT_BAND_HIGH_HZ,
+    noise_gate: float = FFT_NOISE_GATE,
+) -> FrequencyResult:
+    """Compute the dominant frequency within [band_low, band_high] Hz
+    for a captured audio buffer.
+
+    Returns a FrequencyResult with dominant_freq_hz=0.0 when the signal
+    is silent/noise-gated or no energy exists in the target band.
+    """
+    if samples.size == 0 or sample_rate <= 0:
+        return FrequencyResult(0.0, sample_rate, True, 0.0)
+
+    if is_silent(samples, noise_gate):
+        return FrequencyResult(0.0, sample_rate, True, 0.0)
+
+    conditioned = condition_signal(samples)
+    spectrum = np.abs(rfft(conditioned))
+    freqs = rfftfreq(len(conditioned), d=1.0 / sample_rate)
+
+    band_mask = (freqs >= band_low) & (freqs <= band_high)
+    if not np.any(band_mask):
+        return FrequencyResult(0.0, sample_rate, False, 0.0)
+
+    band_freqs = freqs[band_mask]
+    band_spectrum = spectrum[band_mask]
+    peak_idx = int(np.argmax(band_spectrum))
+
+    return FrequencyResult(
+        dominant_freq_hz=float(band_freqs[peak_idx]),
+        sample_rate_hz=float(sample_rate),
+        is_silent=False,
+        peak_magnitude=float(band_spectrum[peak_idx]),
+    )
+</file>
+
+<file path="audio/filters.py">
+# -*- coding: utf-8 -*-
+"""
+audio/filters.py
+==================
+Signal-conditioning helpers applied before FFT: DC-offset removal,
+windowing, and a noise gate. Kept separate from fft.py so each
+concern is independently testable.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+def remove_dc_offset(samples: np.ndarray) -> np.ndarray:
+    """Subtract the mean to remove DC bias from the raw audio buffer."""
+    return samples - np.mean(samples)
+
+
+def apply_window(samples: np.ndarray, window: str = "hann") -> np.ndarray:
+    """Apply a windowing function to reduce spectral leakage before FFT."""
+    n = len(samples)
+    if n == 0:
+        return samples
+    if window == "hann":
+        w = np.hanning(n)
+    elif window == "hamming":
+        w = np.hamming(n)
+    elif window == "blackman":
+        w = np.blackman(n)
+    else:
+        w = np.ones(n)
+    return samples * w
+
+
+def is_silent(samples: np.ndarray, noise_gate: float) -> bool:
+    """Return True if the peak amplitude is below the noise gate,
+    meaning the buffer is effectively silence/noise and should not be
+    analyzed further."""
+    if samples.size == 0:
+        return True
+    return bool(np.max(np.abs(samples)) < noise_gate)
+
+
+def condition_signal(samples: np.ndarray, window: str = "hann") -> np.ndarray:
+    """Full conditioning pipeline: DC removal followed by windowing."""
+    return apply_window(remove_dc_offset(samples), window=window)
+</file>
+
+<file path="sensors/__init__.py">
+"""Sensors subpackage: HX711 load cell, MPU6050 IMU, DHT22, and INMP441 wrappers."""
+</file>
+
+<file path="sensors/dht22_sensor.py">
+# -*- coding: utf-8 -*-
+"""
+sensors/dht22_sensor.py
+=========================
+DHT22 temperature/humidity sensor with multi-sample median filtering
+to reject the occasional bad read the DHT22's one-wire protocol is
+prone to.
+
+Uses the actively-maintained `adafruit-circuitpython-dht` library
+(imported as `adafruit_dht`) rather than the deprecated `Adafruit_DHT`
+package, with a fallback to `Adafruit_DHT` if that is what's installed.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from config import DHT22_PIN
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_BACKEND = None
+_board = None
+_dht_device = None
+
+try:
+    import adafruit_dht  # type: ignore
+    import board  # type: ignore
+
+    _BACKEND = "adafruit_dht"
+    _board = board
+except ImportError:
+    try:
+        import Adafruit_DHT  # type: ignore
+
+        _BACKEND = "Adafruit_DHT"
+    except ImportError:  # pragma: no cover
+        _BACKEND = None
+
+
+@dataclass
+class ClimateReading:
+    temperature_c: float
+    humidity_pct: float
+
+
+class Dht22Sensor:
+    """DHT22 wrapper providing a robust, outlier-resistant read."""
+
+    def __init__(self, pin: int = DHT22_PIN) -> None:
+        self._pin = pin
+        self._device = None
+        if _BACKEND == "adafruit_dht":
+            try:
+                gpio_pin = getattr(_board, f"D{pin}")
+                self._device = adafruit_dht.DHT22(gpio_pin, use_pulseio=False)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to initialize adafruit_dht DHT22: %s", exc)
+        elif _BACKEND is None:
+            logger.warning("No DHT22 library available; readings will be 0.0")
+
+    def _read_once(self) -> Tuple[Optional[float], Optional[float]]:
+        if _BACKEND == "adafruit_dht" and self._device is not None:
+            try:
+                return self._device.temperature, self._device.humidity
+            except RuntimeError as exc:
+                # DHT22 one-wire glitches are common and expected; log at debug.
+                logger.debug("DHT22 transient read error: %s", exc)
+                return None, None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DHT22 read failed: %s", exc)
+                return None, None
+        elif _BACKEND == "Adafruit_DHT":
+            try:
+                import Adafruit_DHT  # type: ignore
+
+                humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, self._pin)
+                return temperature, humidity
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DHT22 (legacy backend) read failed: %s", exc)
+                return None, None
+        return None, None
+
+    def read_median(self, samples: int = 3, delay_s: float = 0.2) -> ClimateReading:
+        """Take several readings and return the median, discarding
+        failed samples. Falls back to 0.0/0.0 if all samples fail."""
+        temps: List[float] = []
+        hums: List[float] = []
+        for _ in range(samples):
+            temp, hum = self._read_once()
+            if temp is not None and hum is not None:
+                temps.append(temp)
+                hums.append(hum)
+            time.sleep(delay_s)
+
+        temperature = float(np.median(temps)) if temps else 0.0
+        humidity = float(np.median(hums)) if hums else 0.0
+        return ClimateReading(temperature_c=round(temperature, 2), humidity_pct=round(humidity, 2))
+</file>
+
+<file path="sensors/hx711_sensor.py">
+# -*- coding: utf-8 -*-
+"""
+sensors/hx711_sensor.py
+=========================
+HX711 load-cell weight sensor with accurate calibration, stability
+detection, outlier-rejected weight reads, and automatic calibration
+persistence/recovery.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import numpy as np
+
+from config import (
+    CALIBRATION_MAX_ITERATIONS,
+    CALIBRATION_TOLERANCE,
+    HX711_DOUT_PIN,
+    HX711_SCK_PIN,
+    STABILITY_WINDOW_S,
+    WEIGHT_MAX_VALID,
+    WEIGHT_MIN_VALID,
+)
+from utils.calibration import CalibrationData, load_calibration, save_calibration
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+try:
+    from hx711 import HX711
+except ImportError:  # pragma: no cover - hardware library absent on dev machines
+    HX711 = None  # type: ignore[assignment,misc]
+
+
+class HX711Sensor:
+    """Wraps the `hx711` library, adding robust weight reads and a
+    guided, iterative calibration routine that persists results."""
+
+    def __init__(
+        self,
+        dout_pin: int = HX711_DOUT_PIN,
+        sck_pin: int = HX711_SCK_PIN,
+        notify=None,
+    ) -> None:
+        self._notify = notify or (lambda msg: None)
+        self._hx = None
+        if HX711 is not None:
+            try:
+                self._hx = HX711(dout_pin=dout_pin, pd_sck_pin=sck_pin)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to initialize HX711: %s", exc)
+        else:
+            logger.warning("hx711 library not available; weight readings will be 0.0")
+
+    # ------------------------------------------------------------------
+    # Raw helpers
+    # ------------------------------------------------------------------
+    def _raw_mean(self, samples: int = 7, inner: int = 30) -> float:
+        if self._hx is None:
+            return 0.0
+        vals = []
+        for _ in range(samples):
+            try:
+                if hasattr(self._hx, "get_value_mean"):
+                    vals.append(self._hx.get_value_mean(inner))
+                elif hasattr(self._hx, "get_raw_data_mean"):
+                    vals.append(self._hx.get_raw_data_mean(inner))
+                elif hasattr(self._hx, "read_average"):
+                    vals.append(self._hx.read_average(inner))
+                else:
+                    vals.append(self._hx.get_weight_mean(inner))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("HX711 raw read failed: %s", exc)
+            time.sleep(0.05)
+        return float(np.median(vals)) if vals else 0.0
+
+    def _wait_stable_raw(self, seconds: float = STABILITY_WINDOW_S, inner: int = 20) -> Tuple[float, float]:
+        buf = []
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            buf.append(self._raw_mean(samples=1, inner=inner))
+            time.sleep(0.05)
+        if not buf:
+            return 0.0, float("inf")
+        arr = np.array(buf, dtype=float)
+        return float(np.median(arr)), float(np.std(arr))
+
+    def read_weight_robust(self, samples: int = 15) -> float:
+        """Outlier-rejected, clamped weight read in grams."""
+        if self._hx is None:
+            return 0.0
+        vals = []
+        for _ in range(samples):
+            try:
+                vals.append(self._hx.get_weight_mean(10))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("HX711 weight read failed: %s", exc)
+                continue
+            time.sleep(0.02)
+        if not vals:
+            return 0.0
+        arr = np.array(vals, dtype=float)
+        low, high = np.percentile(arr, [10, 90])
+        trimmed = arr[(arr >= low) & (arr <= high)]
+        if trimmed.size == 0:
+            trimmed = arr
+        weight = float(np.median(trimmed))
+        weight = max(min(weight, WEIGHT_MAX_VALID), WEIGHT_MIN_VALID)
+        return round(weight, 2)
+
+    # ------------------------------------------------------------------
+    # Calibration
+    # ------------------------------------------------------------------
+    def calibrate(
+        self,
+        target_weight_g: float,
+        owner_name: str = "System",
+        owner_id: Optional[int] = None,
+    ) -> CalibrationData:
+        """Guided calibration:
+        1. Tare / reset.
+        2. Sample an empty-scale baseline window.
+        3. Prompt for the known weight, sample a with-weight window.
+        4. Compute ratio = raw_delta / target, auto sign-flip if needed.
+        5. Iteratively refine toward the target within tolerance.
+        6. Persist and return the resulting CalibrationData.
+        """
+        if self._hx is None:
+            logger.error("Cannot calibrate: HX711 hardware not initialized")
+            cal = CalibrationData(weight_g=target_weight_g, scale_ratio=1.0,
+                                   owner_name=owner_name, owner_id=owner_id)
+            save_calibration(cal.weight_g, cal.scale_ratio, owner_name, owner_id)
+            return cal
+
+        self._hx.reset()
+        self._hx.zero()
+        time.sleep(0.8)
+
+        self._notify("⚙️ Calibration: keep scale empty for 3s...")
+        time.sleep(3.0)
+
+        self._notify(f"⚖️ Place calibration weight `{target_weight_g} g` now. Waiting {int(STABILITY_WINDOW_S) + 5}s...")
+        time.sleep(STABILITY_WINDOW_S + 5.0)
+
+        baseline_med, _ = self._wait_stable_raw(seconds=STABILITY_WINDOW_S, inner=25)
+        weight_med, _ = self._wait_stable_raw(seconds=STABILITY_WINDOW_S, inner=25)
+
+        delta = weight_med - baseline_med
+        if abs(delta) < 1e-6:
+            delta = 1.0
+        ratio = delta / float(target_weight_g)
+
+        self._hx.set_scale_ratio(ratio)
+        test_weight = self.read_weight_robust(samples=15)
+
+        if test_weight < 0:
+            ratio = -ratio
+            self._hx.set_scale_ratio(ratio)
+            test_weight = self.read_weight_robust(samples=15)
+
+        target = float(target_weight_g)
+        for _ in range(CALIBRATION_MAX_ITERATIONS):
+            err = abs(test_weight - target) / max(target, 1e-6)
+            if err <= CALIBRATION_TOLERANCE:
+                break
+            ratio = ratio * (test_weight / target) if test_weight != 0 else ratio
+            self._hx.set_scale_ratio(ratio)
+            time.sleep(0.2)
+            test_weight = self.read_weight_robust(samples=15)
+
+        save_calibration(target_weight_g, ratio, owner_name, owner_id)
+
+        badge = "✅ SUCCESS" if abs(test_weight - target) <= 0.05 * target else "⚠️ CHECK"
+        self._notify(
+            f"{badge}\nCalibration Done\nRatio: `{ratio:.6f}`\n"
+            f"Check Weight: {test_weight:.2f} g (target {target:.2f} g)"
+        )
+        return CalibrationData(
+            weight_g=target_weight_g, scale_ratio=ratio, owner_name=owner_name, owner_id=owner_id
+        )
+
+    def apply_saved_calibration(self) -> CalibrationData:
+        """Load and apply calibration persisted from a previous run
+        (used to recover automatically after a reboot)."""
+        cal = load_calibration()
+        if self._hx is not None:
+            try:
+                self._hx.set_scale_ratio(cal.scale_ratio)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to apply saved calibration ratio: %s", exc)
+        return cal
+</file>
+
+<file path="sensors/inmp441_sensor.py">
+# -*- coding: utf-8 -*-
+"""
+sensors/inmp441_sensor.py
+============================
+High-level sensor facade around the INMP441 I2S microphone: captures
+audio via `audio.capture.Inmp441Capture` and returns the dominant bee
+frequency via `audio.fft.analyze`. This is the module `monitor.py`
+talks to, keeping the acoustic pipeline internals in `audio/`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from audio.capture import Inmp441Capture, MicrophoneUnavailableError
+from audio.fft import FrequencyResult, analyze
+from config import INMP441_CAPTURE_SECONDS
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class AcousticReading:
+    dominant_freq_hz: float
+    sample_rate_hz: float
+    silent: bool
+    available: bool
+
+
+class Inmp441Sensor:
+    """Facade combining capture + FFT, with graceful degradation if the
+    microphone is disconnected or PortAudio is unavailable."""
+
+    def __init__(self) -> None:
+        self._capture = Inmp441Capture()
+
+    def read(self, duration_s: float = INMP441_CAPTURE_SECONDS) -> AcousticReading:
+        try:
+            samples = self._capture.capture(duration_s=duration_s)
+        except MicrophoneUnavailableError as exc:
+            logger.warning("INMP441 unavailable this cycle: %s", exc)
+            return AcousticReading(0.0, 0.0, silent=True, available=False)
+
+        result: FrequencyResult = analyze(samples, self._capture.sample_rate)
+        return AcousticReading(
+            dominant_freq_hz=result.dominant_freq_hz,
+            sample_rate_hz=result.sample_rate_hz,
+            silent=result.is_silent,
+            available=True,
+        )
+
+    def is_connected(self) -> bool:
+        return self._capture.is_available()
+</file>
+
+<file path="sensors/mpu6050_sensor.py">
+# -*- coding: utf-8 -*-
+"""
+sensors/mpu6050_sensor.py
+============================
+MPU6050 6-axis accelerometer/gyroscope over I2C, with automatic
+recovery if the bus is briefly unavailable (e.g. right after boot).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from config import MPU6050_ADDR, MPU6050_I2C_BUS
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+try:
+    import smbus2 as smbus
+except ImportError:
+    try:
+        import smbus  # type: ignore[no-redef]
+    except ImportError:  # pragma: no cover
+        smbus = None  # type: ignore[assignment]
+
+_PWR_MGMT_1 = 0x6B
+_ACCEL_XOUT_H = 0x3B
+_GYRO_XOUT_H = 0x43
+_ACCEL_CONFIG = 0x1C
+_GYRO_CONFIG = 0x1B
+_ACCEL_SCALE = 16384.0  # LSB/g at +/-2g full scale
+_GYRO_SCALE = 131.0  # LSB/(deg/s) at +/-250 dps full scale
+
+
+@dataclass
+class ImuReading:
+    accel_x: float
+    accel_y: float
+    accel_z: float
+    gyro_x: float
+    gyro_y: float
+    gyro_z: float
+
+
+class Mpu6050Sensor:
+    """MPU6050 wrapper that degrades gracefully (returns zeros) when the
+    I2C bus or device is unavailable, and retries initialization on
+    each read attempt so the sensor recovers automatically once wiring
+    or power is restored."""
+
+    def __init__(self, bus_number: int = MPU6050_I2C_BUS, address: int = MPU6050_ADDR) -> None:
+        self._bus_number = bus_number
+        self._address = address
+        self._bus = None
+        self._connect()
+
+    def _connect(self) -> bool:
+        if smbus is None:
+            return False
+        try:
+            self._bus = smbus.SMBus(self._bus_number)
+            self._bus.write_byte_data(self._address, _PWR_MGMT_1, 0)
+            self._bus.write_byte_data(self._address, _ACCEL_CONFIG, 0x00)
+            self._bus.write_byte_data(self._address, _GYRO_CONFIG, 0x00)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MPU6050 not reachable on I2C bus %d: %s", self._bus_number, exc)
+            self._bus = None
+            return False
+
+    def _read_word(self, addr: int) -> int:
+        if self._bus is None and not self._connect():
+            return 0
+        try:
+            high = self._bus.read_byte_data(self._address, addr)
+            low = self._bus.read_byte_data(self._address, addr + 1)
+            value = (high << 8) | low
+            if value > 32768:
+                value -= 65536
+            return value
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("MPU6050 read failed, will retry connection next cycle: %s", exc)
+            self._bus = None
+            return 0
+
+    def read(self) -> ImuReading:
+        ax = self._read_word(_ACCEL_XOUT_H) / _ACCEL_SCALE
+        ay = self._read_word(_ACCEL_XOUT_H + 2) / _ACCEL_SCALE
+        az = self._read_word(_ACCEL_XOUT_H + 4) / _ACCEL_SCALE
+        gx = self._read_word(_GYRO_XOUT_H) / _GYRO_SCALE
+        gy = self._read_word(_GYRO_XOUT_H + 2) / _GYRO_SCALE
+        gz = self._read_word(_GYRO_XOUT_H + 4) / _GYRO_SCALE
+        return ImuReading(
+            accel_x=round(ax, 2), accel_y=round(ay, 2), accel_z=round(az, 2),
+            gyro_x=round(gx, 1), gyro_y=round(gy, 1), gyro_z=round(gz, 1),
+        )
+</file>
+
+<file path="services/beehive.service">
+[Unit]
+Description=BeeHive Monitor Telegram Bot (Raspberry Pi 4)
+After=network-online.target time-sync.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=BEEHIVE_HOME=__PROJECT_DIR__
+ExecStart=__VENV_DIR__/bin/python3 __PROJECT_DIR__/bot.py
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=0
+
+# Give the bot/monitor time to shut down the child monitor subprocess
+# gracefully before systemd sends SIGKILL.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Hardening (kept permissive enough for GPIO/I2C/I2S/audio access).
+NoNewPrivileges=true
+ProtectSystem=full
+SupplementaryGroups=gpio i2c audio spi
+
+[Install]
+WantedBy=multi-user.target
+</file>
+
+<file path="tests/__init__.py">
+
+</file>
+
+<file path="tests/test_dht22.py">
+# -*- coding: utf-8 -*-
+"""Unit tests for sensors/dht22_sensor.py using a fake read backend."""
+
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+from sensors.dht22_sensor import Dht22Sensor
+
+
+class TestDht22Sensor(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sensor = Dht22Sensor.__new__(Dht22Sensor)
+        self.sensor._pin = 4
+        self.sensor._device = None
+
+    def test_read_median_all_failures_returns_zero(self) -> None:
+        with patch.object(Dht22Sensor, "_read_once", return_value=(None, None)):
+            reading = self.sensor.read_median(samples=3, delay_s=0.0)
+        self.assertEqual(reading.temperature_c, 0.0)
+        self.assertEqual(reading.humidity_pct, 0.0)
+
+    def test_read_median_computes_median_of_valid_samples(self) -> None:
+        values = iter([(20.0, 50.0), (22.0, 52.0), (21.0, 51.0)])
+        with patch.object(Dht22Sensor, "_read_once", side_effect=lambda: next(values)):
+            reading = self.sensor.read_median(samples=3, delay_s=0.0)
+        self.assertAlmostEqual(reading.temperature_c, 21.0, places=1)
+        self.assertAlmostEqual(reading.humidity_pct, 51.0, places=1)
+
+    def test_read_median_discards_partial_failures(self) -> None:
+        values = iter([(None, None), (24.0, 60.0), (26.0, 62.0)])
+        with patch.object(Dht22Sensor, "_read_once", side_effect=lambda: next(values)):
+            reading = self.sensor.read_median(samples=3, delay_s=0.0)
+        self.assertAlmostEqual(reading.temperature_c, 25.0, places=1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+</file>
+
+<file path="tests/test_hx711.py">
+# -*- coding: utf-8 -*-
+"""Unit tests for sensors/hx711_sensor.py.
+
+These tests avoid real hardware entirely by monkeypatching the
+internal `_hx` handle with a fake object, so they run on any machine
+(CI, laptop) without a Raspberry Pi or HX711 attached.
+"""
+
+from __future__ import annotations
+
+import unittest
+from unittest.mock import MagicMock
+
+from sensors.hx711_sensor import HX711Sensor
+
+
+class FakeHX711:
+    """Minimal stand-in for the `hx711.HX711` class."""
+
+    def __init__(self) -> None:
+        self.ratio = 1.0
+        self._weight_values = [100.0]
+
+    def reset(self) -> None:
+        pass
+
+    def zero(self) -> None:
+        pass
+
+    def set_scale_ratio(self, ratio: float) -> None:
+        self.ratio = ratio
+
+    def get_weight_mean(self, samples: int) -> float:
+        return self._weight_values[0]
+
+    def get_value_mean(self, samples: int) -> float:
+        return 50000.0
+
+
+class TestHX711Sensor(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sensor = HX711Sensor.__new__(HX711Sensor)  # bypass __init__ hardware probing
+        self.sensor._notify = MagicMock()
+        self.sensor._hx = FakeHX711()
+
+    def test_read_weight_robust_returns_zero_without_hardware(self) -> None:
+        sensor = HX711Sensor.__new__(HX711Sensor)
+        sensor._hx = None
+        self.assertEqual(sensor.read_weight_robust(), 0.0)
+
+    def test_read_weight_robust_clamps_and_rounds(self) -> None:
+        self.sensor._hx._weight_values = [10000.0]  # far above WEIGHT_MAX_VALID
+        weight = self.sensor.read_weight_robust(samples=5)
+        self.assertLessEqual(weight, 5000.0)
+
+    def test_read_weight_robust_normal_range(self) -> None:
+        self.sensor._hx._weight_values = [212.34]
+        weight = self.sensor.read_weight_robust(samples=5)
+        self.assertAlmostEqual(weight, 212.34, places=2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+</file>
+
+<file path="tests/test_inmp441.py">
+# -*- coding: utf-8 -*-
+"""Unit tests for the INMP441 audio pipeline (audio/filters.py,
+audio/fft.py, sensors/inmp441_sensor.py) using synthetic signals so no
+real microphone hardware is required."""
+
+from __future__ import annotations
+
+import unittest
+
+import numpy as np
+
+from audio import fft as fft_module
+from audio.filters import apply_window, condition_signal, is_silent, remove_dc_offset
+from sensors.inmp441_sensor import Inmp441Sensor
+from audio.capture import MicrophoneUnavailableError
+
+
+class TestFilters(unittest.TestCase):
+    def test_remove_dc_offset_zeros_mean(self) -> None:
+        samples = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        result = remove_dc_offset(samples)
+        self.assertAlmostEqual(float(np.mean(result)), 0.0, places=6)
+
+    def test_apply_window_preserves_length(self) -> None:
+        samples = np.ones(256)
+        windowed = apply_window(samples, window="hann")
+        self.assertEqual(len(windowed), 256)
+
+    def test_is_silent_detects_low_amplitude(self) -> None:
+        quiet = np.full(100, 0.001)
+        self.assertTrue(is_silent(quiet, noise_gate=0.01))
+
+    def test_is_silent_detects_loud_signal(self) -> None:
+        loud = np.full(100, 0.5)
+        self.assertFalse(is_silent(loud, noise_gate=0.01))
+
+    def test_condition_signal_runs_end_to_end(self) -> None:
+        samples = np.sin(np.linspace(0, 10, 512)) + 3.0  # with DC offset
+        conditioned = condition_signal(samples)
+        self.assertEqual(len(conditioned), 512)
+
+
+class TestFft(unittest.TestCase):
+    def test_analyze_detects_known_tone(self) -> None:
+        sample_rate = 8000.0
+        duration = 1.0
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        tone_hz = 250.0
+        signal = 0.8 * np.sin(2 * np.pi * tone_hz * t)
+
+        result = fft_module.analyze(signal, sample_rate, band_low=100, band_high=800, noise_gate=0.01)
+
+        self.assertFalse(result.is_silent)
+        self.assertAlmostEqual(result.dominant_freq_hz, tone_hz, delta=5.0)
+
+    def test_analyze_silent_buffer_returns_zero(self) -> None:
+        samples = np.zeros(1000)
+        result = fft_module.analyze(samples, 8000.0)
+        self.assertTrue(result.is_silent)
+        self.assertEqual(result.dominant_freq_hz, 0.0)
+
+    def test_analyze_empty_buffer_is_safe(self) -> None:
+        result = fft_module.analyze(np.array([]), 8000.0)
+        self.assertEqual(result.dominant_freq_hz, 0.0)
+
+
+class TestInmp441SensorFacade(unittest.TestCase):
+    def test_read_degrades_gracefully_when_capture_unavailable(self) -> None:
+        sensor = Inmp441Sensor.__new__(Inmp441Sensor)
+
+        class RaisingCapture:
+            sample_rate = 44100
+
+            def capture(self, duration_s: float):  # noqa: ANN001
+                raise MicrophoneUnavailableError("no device")
+
+        sensor._capture = RaisingCapture()
+        reading = sensor.read(duration_s=0.1)
+        self.assertFalse(reading.available)
+        self.assertTrue(reading.silent)
+        self.assertEqual(reading.dominant_freq_hz, 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+</file>
+
+<file path="tests/test_mpu6050.py">
+# -*- coding: utf-8 -*-
+"""Unit tests for sensors/mpu6050_sensor.py using a fake I2C bus."""
+
+from __future__ import annotations
+
+import unittest
+
+from sensors.mpu6050_sensor import Mpu6050Sensor
+
+
+class FakeBus:
+    def __init__(self) -> None:
+        self.written = []
+
+    def write_byte_data(self, addr, reg, value):  # noqa: ANN001
+        self.written.append((addr, reg, value))
+
+    def read_byte_data(self, addr, reg):  # noqa: ANN001
+        # Return deterministic bytes so we can predict the decoded value.
+        return 0x01 if reg % 2 == 0 else 0x00
+
+
+class TestMpu6050Sensor(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sensor = Mpu6050Sensor.__new__(Mpu6050Sensor)
+        self.sensor._bus_number = 1
+        self.sensor._address = 0x68
+        self.sensor._bus = FakeBus()
+
+    def test_read_word_decodes_big_endian_pair(self) -> None:
+        value = self.sensor._read_word(0x3B)
+        # ACCEL_XOUT_H = 0x3B (odd) => high byte = 0x00; low reg 0x3C (even) => 0x01
+        # decoded = (0x00 << 8) | 0x01 == 1
+        self.assertEqual(value, 1)
+
+    def test_read_returns_scaled_imu_reading(self) -> None:
+        reading = self.sensor.read()
+        self.assertIsInstance(reading.accel_x, float)
+        self.assertIsInstance(reading.gyro_z, float)
+
+    def test_read_word_handles_missing_bus_gracefully(self) -> None:
+        sensor = Mpu6050Sensor.__new__(Mpu6050Sensor)
+        sensor._bus_number = 1
+        sensor._address = 0x68
+        sensor._bus = None
+        sensor._connect = lambda: False  # simulate hardware absent
+        self.assertEqual(sensor._read_word(0x3B), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+</file>
+
+<file path="tgbot/__init__.py">
+"""Telegram integration subpackage: alert dispatch, bot commands, and keyboards.
+
+Named `tgbot` rather than `telegram` on purpose: a local package named
+`telegram` would shadow the installed `python-telegram-bot` library
+(which is imported as `telegram`) whenever the project directory is
+on `sys.path`, breaking every `from telegram import ...` statement in
+this codebase. Keeping this package under a distinct name avoids that
+collision entirely.
+"""
+</file>
+
+<file path="tgbot/alerts.py">
+# -*- coding: utf-8 -*-
+"""
+tgbot/alerts.py
+=================
+Bee behaviour classification from dominant frequency, full alert-rule
+evaluation across acoustics/environment/weight/motion, and resilient
+Telegram send helpers used by both `monitor.py` (posting to the public
+channel) and `bot.py` (direct messages to members).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import requests
+
+from config import (
+    ALERT_FREQ_CHANGE_THRESHOLD,
+    ALERT_HUMID_HIGH,
+    ALERT_HUMID_LOW,
+    ALERT_TEMP_HIGH,
+    ALERT_TEMP_LOW,
+    ACCEL_Z_EXPECTED_G,
+    ACCEL_Z_TOLERANCE,
+    GYRO_ABS_ALERT,
+    MOTION_ACCEL_DELTA,
+    MOTION_GYRO_DELTA,
+    TELEGRAM_BOT_TOKEN,
+    WEIGHT_MAX_VALID,
+    WEIGHT_SUDDEN_JUMP,
+)
+from utils.logger import get_logger
+from utils.network import build_http_session
+
+logger = get_logger(__name__)
+
+_session = build_http_session()
+
+
+# ----------------------------------------------------------------------
+# Behaviour classification
+# ----------------------------------------------------------------------
+def classify_behavior(freq: float) -> Tuple[str, Optional[str]]:
+    """Return (status_label, alert_text_or_None) for a dominant frequency."""
+    if freq > 450:
+        return "⚔️ Aggressive / Swarming", (
+            f"⚔️ *DANGER: Aggression/Swarm Detected!* ({freq:.2f}Hz)\n"
+            "_High pitch indicates bees are defensive or taking flight to swarm._"
+        )
+    if 330 <= freq <= 450:
+        return "👑 Queen Piping", (
+            f"👑 *ALERT: Queen Piping Detected!* ({freq:.2f}Hz)\n"
+            "_Virgin queen is signaling; a swarm may leave the hive soon._"
+        )
+    if 190 <= freq < 330:
+        return "🟢 Normal / Active", None
+    if 100 <= freq < 190:
+        return "🆘 Queenless Roar", (
+            f"🆘 *WARNING: Queenless Roar!* ({freq:.2f}Hz)\n"
+            "_Low, chaotic moaning sound indicates distress or a missing queen._"
+        )
+    if 0 < freq < 100:
+        return "💤 Dormant / Low", (
+            f"💤 *NOTICE: Low Activity* ({freq:.2f}Hz)\n"
+            "_Hive is dormant/sleeping, or the sensor path is obstructed._"
+        )
+    return "⚪ Unknown / Silence", None
+
+
+@dataclass
+class AlertContext:
+    """Previous-cycle state needed to detect sudden changes."""
+
+    prev_freq: float = 0.0
+    prev_weight: Optional[float] = None
+    prev_accel_mag: Optional[float] = None
+    prev_gyro_mag: Optional[float] = None
+
+
+def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple[List[str], str]:
+    """Evaluate every alert rule against the current sensor snapshot and
+    the previous cycle's context. Returns (alerts, behavior_status)."""
+    alerts: List[str] = []
+
+    status, freq_alert = classify_behavior(dominant_freq)
+    if freq_alert:
+        alerts.append(freq_alert)
+    if ctx.prev_freq > 0 and abs(dominant_freq - ctx.prev_freq) >= ALERT_FREQ_CHANGE_THRESHOLD:
+        alerts.append(f"⚠️ *Sudden Freq Shift:* {ctx.prev_freq:.2f}Hz ➡ {dominant_freq:.2f}Hz")
+
+    t, h = sensor["temperature"], sensor["humidity"]
+    if t > ALERT_TEMP_HIGH:
+        alerts.append(f"🔥 *Too Hot:* {t:.1f}°C")
+    elif t < ALERT_TEMP_LOW:
+        alerts.append(f"🥶 *Too Cold:* {t:.1f}°C")
+    if h < ALERT_HUMID_LOW:
+        alerts.append(f"🌵 *Too Dry:* {h:.1f}%")
+    elif h > ALERT_HUMID_HIGH:
+        alerts.append(f"💧 *Too Humid:* {h:.1f}%")
+
+    w = sensor["weight"]
+    if w < 0:
+        alerts.append(f"⚖️ *Negative Weight:* {w:.2f} g")
+    if w > WEIGHT_MAX_VALID:
+        alerts.append(f"⚖️ *Over Capacity:* {w:.2f} g")
+    if ctx.prev_weight is not None and abs(w - ctx.prev_weight) >= WEIGHT_SUDDEN_JUMP:
+        delta = w - ctx.prev_weight
+        direction = "increase" if delta > 0 else "decrease"
+        alerts.append(f"⚖️ *Sudden weight {direction}:* {ctx.prev_weight:.2f} g → {w:.2f} g (Δ {delta:+.2f} g)")
+
+    if abs(sensor["accel_z"] - ACCEL_Z_EXPECTED_G) > ACCEL_Z_TOLERANCE:
+        alerts.append(f"📈 *Tilt/Movement:* AccZ={sensor['accel_z']:.2f}g")
+    if any(abs(g) > GYRO_ABS_ALERT for g in (sensor["gyro_x"], sensor["gyro_y"], sensor["gyro_z"])):
+        alerts.append(
+            f"🌀 *High Rotation:* Gx={sensor['gyro_x']:.1f}, Gy={sensor['gyro_y']:.1f}, Gz={sensor['gyro_z']:.1f}"
+        )
+
+    ax, ay, az = sensor["accel_x"], sensor["accel_y"], sensor["accel_z"]
+    accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
+    gx, gy, gz = sensor["gyro_x"], sensor["gyro_y"], sensor["gyro_z"]
+    gyro_mag = (gx**2 + gy**2 + gz**2) ** 0.5
+
+    if ctx.prev_accel_mag is not None and abs(accel_mag - ctx.prev_accel_mag) >= MOTION_ACCEL_DELTA:
+        d = accel_mag - ctx.prev_accel_mag
+        direction = "increase" if d > 0 else "decrease"
+        alerts.append(f"📳 *Sudden acceleration {direction}:* |a| {ctx.prev_accel_mag:.2f}g → {accel_mag:.2f}g (Δ {d:+.2f}g)")
+
+    if ctx.prev_gyro_mag is not None and abs(gyro_mag - ctx.prev_gyro_mag) >= MOTION_GYRO_DELTA:
+        d = gyro_mag - ctx.prev_gyro_mag
+        direction = "increase" if d > 0 else "decrease"
+        alerts.append(f"🌀 *Sudden rotation {direction}:* |ω| {ctx.prev_gyro_mag:.1f} → {gyro_mag:.1f} (Δ {d:+.1f})")
+
+    ctx.prev_freq = dominant_freq
+    ctx.prev_weight = w
+    ctx.prev_accel_mag = accel_mag
+    ctx.prev_gyro_mag = gyro_mag
+
+    return alerts, status
+
+
+# ----------------------------------------------------------------------
+# Telegram send helpers (used by monitor.py, which has no Bot instance
+# of its own -- it talks to the Bot API directly over HTTPS so it does
+# not depend on python-telegram-bot's async Updater/Application).
+# ----------------------------------------------------------------------
+def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
+    """Send a message via raw Bot API HTTPS call with retry/backoff."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    try:
+        resp = _session.post(url, data=payload, timeout=10)
+        if resp.status_code != 200:
+            logger.warning("Telegram sendMessage non-200: %s %s", resp.status_code, resp.text[:200])
+            return False
+        return True
+    except requests.exceptions.RequestException as exc:
+        logger.error("Telegram sendMessage failed: %s", exc)
+        return False
+
+
+def send_channel_log(channel: str, text: str) -> bool:
+    return send_message(channel, text)
+
+
+def send_data_and_alerts(channel: str, data_message: str, alerts: List[str]) -> bool:
+    alert_section = "\n".join(alerts) + "\n\n" if alerts else ""
+    return send_message(channel, alert_section + data_message)
+</file>
+
+<file path="tgbot/commands.py">
+# -*- coding: utf-8 -*-
+"""
+tgbot/commands.py
+====================
+Command and callback handlers for the BeeHive Monitor Telegram bot,
+built on `python-telegram-bot` v20+ (async `Application` API).
+
+Responsibilities:
+    * Member/admin authorization
+    * Start / stop / restart the monitor subprocess
+    * Guided calibration flow (initial + change)
+    * Status, sensor readings, CSV download
+    * Pi health: CPU temp/usage, memory, disk, uptime, system info
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import platform
+import signal
+import subprocess
+import time
+from datetime import datetime, timedelta
+from functools import wraps
+from typing import Callable, Dict, Optional
+
+import psutil
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
+
+from config import (
+    CALIBRATION_FILE,
+    HIVE_DATA_CSV,
+    MEMBERS_FILE,
+    MONITOR_SCRIPT,
+    PYTHON_EXECUTABLE,
+    TELEGRAM_AUTHORIZED_USER_ID,
+    TELEGRAM_LOG_CHANNEL,
+    TELEGRAM_PUBLIC_CHANNEL_LINK,
+)
+from tgbot import keyboards
+from utils.calibration import save_calibration
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# ----------------------------------------------------------------------
+# Process/runtime state (single-process bot, so module-level state is
+# fine; guarded implicitly by the asyncio event loop being single
+# threaded for handler execution).
+# ----------------------------------------------------------------------
+_state: Dict[str, Optional[object]] = {
+    "process": None,       # subprocess.Popen | None
+    "runner_id": None,     # int | None
+    "runner_name": None,   # str | None
+}
+_start_time = time.time()
+
+
+# ----------------------------------------------------------------------
+# Member management
+# ----------------------------------------------------------------------
+def load_members() -> dict:
+    if not MEMBERS_FILE.exists():
+        return {}
+    try:
+        with open(MEMBERS_FILE, "r") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Failed to load members file: %s", exc)
+        return {}
+
+
+def save_members(members: dict) -> None:
+    try:
+        MEMBERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(MEMBERS_FILE, "w") as fh:
+            json.dump(members, fh, indent=4)
+    except OSError as exc:
+        logger.error("Failed to save members file: %s", exc)
+
+
+def is_member(user_id: int) -> bool:
+    return str(user_id) in load_members()
+
+
+def _actor(update: Update):
+    if update.effective_user:
+        return update.effective_user
+    return None
+
+
+def restricted_admin(func: Callable) -> Callable:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *a, **kw):
+        user = _actor(update)
+        if user is None:
+            return
+        if user.id != TELEGRAM_AUTHORIZED_USER_ID:
+            if update.message:
+                await update.message.reply_text("🛑 Admin only access.")
+            elif update.callback_query:
+                await update.callback_query.answer("🛑 Admin only access.", show_alert=True)
+            return
+        return await func(update, context, *a, **kw)
+
+    return wrapper
+
+
+def member_required(func: Callable) -> Callable:
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *a, **kw):
+        user = _actor(update)
+        if user is None:
+            return
+        if user.id != TELEGRAM_AUTHORIZED_USER_ID and not is_member(user.id):
+            if update.message:
+                await update.message.reply_text("🛑 Access Denied. Only approved members can send commands.")
+            elif update.callback_query:
+                await update.callback_query.answer(
+                    "🛑 Access Denied. Only approved members can send commands.", show_alert=True
+                )
+            return
+        return await func(update, context, *a, **kw)
+
+    return wrapper
+
+
+# ----------------------------------------------------------------------
+# Monitor process control
+# ----------------------------------------------------------------------
+def _is_running() -> bool:
+    proc = _state["process"]
+    return proc is not None and proc.poll() is None
+
+
+def _launch_monitor(weight_g: float, user_name: str, user_id: str) -> None:
+    _state["process"] = subprocess.Popen(
+        [PYTHON_EXECUTABLE, str(MONITOR_SCRIPT), str(weight_g), user_name, user_id],
+        text=True,
+        cwd=str(MONITOR_SCRIPT.parent),
+    )
+    _state["runner_id"] = int(user_id) if str(user_id).isdigit() else None
+    _state["runner_name"] = user_name.split("(")[0].strip()
+
+
+def _stop_monitor() -> None:
+    proc = _state["process"]
+    if proc is not None:
+        try:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Error stopping monitor process: %s", exc)
+    _state["process"] = None
+    _state["runner_id"] = None
+    _state["runner_name"] = None
+
+
+# ----------------------------------------------------------------------
+# /start and main menu
+# ----------------------------------------------------------------------
+@member_required
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data["awaiting_calibration"] = False
+    context.user_data["awaiting_calibration_change"] = False
+    await update.message.reply_text(
+        "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
+        reply_markup=keyboards.main_menu(_is_running()),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+@restricted_admin
+async def channeltest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_LOG_CHANNEL, text="✅ Channel test message", parse_mode=ParseMode.MARKDOWN
+        )
+        await update.message.reply_text("Sent test message to channel.")
+    except Exception as exc:  # noqa: BLE001
+        await update.message.reply_text(f"Failed to post: {exc}")
+
+
+# ----------------------------------------------------------------------
+# System info helpers
+# ----------------------------------------------------------------------
+def _cpu_temperature_c() -> Optional[float]:
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as fh:
+            return round(int(fh.read().strip()) / 1000.0, 1)
+    except (OSError, ValueError):
+        return None
+
+
+def _uptime_str() -> str:
+    boot = datetime.fromtimestamp(psutil.boot_time())
+    delta = datetime.now() - boot
+    days, rem = divmod(int(delta.total_seconds()), 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    return f"{days}d {hours}h {minutes}m"
+
+
+def _bot_uptime_str() -> str:
+    delta = timedelta(seconds=int(time.time() - _start_time))
+    return str(delta)
+
+
+def _pi_health_text() -> str:
+    temp = _cpu_temperature_c()
+    temp_str = f"{temp:.1f}°C" if temp is not None else "N/A"
+    cpu_pct = psutil.cpu_percent(interval=0.3)
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    return (
+        "⚙️ *System Health*\n\n"
+        f"🌡️ CPU Temp: `{temp_str}`\n"
+        f"🧮 CPU Usage: `{cpu_pct:.1f}%`\n"
+        f"💾 Memory: `{mem.percent:.1f}%` used ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)\n"
+        f"💿 Disk: `{disk.percent:.1f}%` used ({disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB)\n"
+        f"⏱️ System Uptime: `{_uptime_str()}`\n"
+        f"🤖 Bot Uptime: `{_bot_uptime_str()}`"
+    )
+
+
+def _system_info_text() -> str:
+    return (
+        "🖥️ *System Information*\n\n"
+        f"Platform: `{platform.system()} {platform.release()}`\n"
+        f"Machine: `{platform.machine()}`\n"
+        f"Python: `{platform.python_version()}`\n"
+        f"Hostname: `{platform.node()}`\n"
+        f"CPU Cores: `{psutil.cpu_count(logical=True)}`"
+    )
+
+
+def _latest_sensor_row() -> Optional[str]:
+    """Return the last CSV row (most recent sensor reading) as text."""
+    if not HIVE_DATA_CSV.exists():
+        return None
+    try:
+        with open(HIVE_DATA_CSV, "r") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return None
+        headers = lines[0].split(",")
+        values = lines[-1].split(",")
+        pairs = zip(headers, values)
+        return "\n".join(f"*{h}:* `{v}`" for h, v in pairs)
+    except OSError as exc:
+        logger.error("Failed to read latest sensor row: %s", exc)
+        return None
+
+
+# ----------------------------------------------------------------------
+# Callback query router
+# ----------------------------------------------------------------------
+async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    action = query.data
+    uid = query.from_user.id
+
+    restricted_actions = {
+        "start_init_member", "stop_script_member", "change_calibration",
+    }
+    if action in restricted_actions and uid != TELEGRAM_AUTHORIZED_USER_ID and not is_member(uid):
+        await query.answer("🛑 Access Denied.", show_alert=True)
+        return
+
+    if action == "start_init_member":
+        await _handle_start_request(update, context)
+    elif action == "stop_script_member":
+        await _handle_stop(update, context)
+    elif action == "status_check":
+        status = f"🟢 Running (by {_state['runner_name']})" if _is_running() else "🔴 Stopped"
+        await query.answer(f"System Status: {status}", show_alert=True)
+    elif action == "change_calibration":
+        await _handle_change_calibration(update, context)
+    elif action == "download_data_csv":
+        await _handle_download_csv(update, context)
+    elif action == "check_pi_health":
+        await query.edit_message_text(
+            _pi_health_text(), reply_markup=keyboards.back_to_menu(), parse_mode=ParseMode.MARKDOWN
+        )
+    elif action == "system_info":
+        await query.edit_message_text(
+            _system_info_text(), reply_markup=keyboards.back_to_menu(), parse_mode=ParseMode.MARKDOWN
+        )
+    elif action == "uptime_info":
+        await query.answer(f"System: {_uptime_str()} | Bot: {_bot_uptime_str()}", show_alert=True)
+    elif action == "sensor_readings":
+        row = _latest_sensor_row()
+        text = row if row else "ℹ️ No sensor data logged yet."
+        await query.edit_message_text(
+            f"📈 *Latest Sensor Readings*\n\n{text}",
+            reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "main_menu":
+        await query.edit_message_text(
+            "*Member Command Center*\n\nUse the buttons below to control the monitoring script.",
+            reply_markup=keyboards.main_menu(_is_running()),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def _handle_start_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if _is_running():
+        await query.answer(f"🔴 Already running by {_state['runner_name']}", show_alert=True)
+        return
+
+    cal = {}
+    try:
+        if CALIBRATION_FILE.exists():
+            with open(CALIBRATION_FILE, "r") as fh:
+                cal = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    user = query.from_user
+    user_name = f"{user.full_name} (@{user.username or user.id})"
+    user_id_str = str(user.id)
+
+    if "weight_g" in cal:
+        weight = cal["weight_g"]
+        _launch_monitor(weight, user_name, user_id_str)
+        await query.edit_message_text(
+            f"🚀 *Monitor STARTED* using stored calibration `{weight}`g.", parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        context.user_data["starting_user_info"] = user_name
+        context.user_data["starting_user_id"] = user_id_str
+        context.user_data["awaiting_calibration"] = True
+        await query.edit_message_text(
+            "⚖️ *Calibration*\n\nType known weight (g).\nExample: `650`", parse_mode=ParseMode.MARKDOWN
+        )
+
+
+async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    uid = query.from_user.id
+    if not _is_running():
+        await query.edit_message_text("ℹ️ Script was not running.")
+        return
+    is_admin = uid == TELEGRAM_AUTHORIZED_USER_ID
+    is_owner = uid == _state["runner_id"]
+    if not (is_admin or is_owner):
+        await query.answer(f"🛑 Only Admin or {_state['runner_name']} can stop.", show_alert=True)
+        return
+    _stop_monitor()
+    await query.edit_message_text("🛑 *Script Stopped safely.*", parse_mode=ParseMode.MARKDOWN)
+
+
+async def _handle_change_calibration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    uid = query.from_user.id
+
+    cal_owner_id = None
+    try:
+        if CALIBRATION_FILE.exists():
+            with open(CALIBRATION_FILE, "r") as fh:
+                cal_owner_id = json.load(fh).get("owner_id")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    is_admin = uid == TELEGRAM_AUTHORIZED_USER_ID
+    is_owner = cal_owner_id is None or uid == cal_owner_id
+    is_runner = _state["runner_id"] is not None and uid == _state["runner_id"]
+
+    if not (is_admin or is_owner or is_member(uid)):
+        await query.answer("🛑 Access Denied.", show_alert=True)
+        return
+
+    if _is_running():
+        if not (is_admin or is_runner):
+            await query.answer(
+                f"🛑 Only Admin or the current runner ({_state['runner_name']}) can stop to recalibrate.",
+                show_alert=True,
+            )
+            return
+        _stop_monitor()
+
+    context.user_data["awaiting_calibration_change"] = True
+    await query.edit_message_text(
+        "⚖️ *Change Calibration*\n\nType new known weight (g).\nExample: `650`", parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def _handle_download_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not HIVE_DATA_CSV.exists():
+        await query.answer("❌ No data file yet.", show_alert=True)
+        return
+    try:
+        with open(HIVE_DATA_CSV, "rb") as fh:
+            await context.bot.send_document(
+                chat_id=query.from_user.id,
+                document=fh,
+                filename=f"hive_data_{datetime.now().strftime('%Y%m%d')}.csv",
+                caption="📊 *Hive Sensor Log*",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception as exc:  # noqa: BLE001
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"❌ Error: {exc}")
+
+
+# ----------------------------------------------------------------------
+# Free-text message handling (calibration weight entry)
+# ----------------------------------------------------------------------
+@member_required
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+    user = update.effective_user
+
+    if context.user_data.get("awaiting_calibration"):
+        await _apply_calibration_and_start(
+            update, context, text,
+            user_name=context.user_data.get("starting_user_info", "Unknown"),
+            user_id=context.user_data.get("starting_user_id", "N/A"),
+            flag="awaiting_calibration",
+            success_msg="✅ *Calibration Complete!*\n\nMonitor RUNNING with `{w}`g.",
+        )
+        return
+
+    if context.user_data.get("awaiting_calibration_change"):
+        user_name = f"{user.full_name} (@{user.username or user.id})"
+        await _apply_calibration_and_start(
+            update, context, text,
+            user_name=user_name,
+            user_id=str(user.id),
+            flag="awaiting_calibration_change",
+            success_msg="✅ *Calibration Updated.* Monitor STARTED with `{w}`g.",
+        )
+        return
+
+
+async def _apply_calibration_and_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    user_name: str,
+    user_id: str,
+    flag: str,
+    success_msg: str,
+) -> None:
+    try:
+        weight = float(text)
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number.")
+        return
+
+    try:
+        owner_id = int(user_id) if str(user_id).isdigit() else update.effective_user.id
+        save_calibration(weight, 1.0, owner_name=user_name, owner_id=owner_id)
+        _launch_monitor(weight, user_name, user_id)
+        await update.message.reply_text(success_msg.format(w=text), parse_mode=ParseMode.MARKDOWN)
+        context.user_data[flag] = False
+    except Exception as exc:  # noqa: BLE001
+        await update.message.reply_text(f"❌ Failed: {exc}")
+</file>
+
+<file path="tgbot/keyboards.py">
+# -*- coding: utf-8 -*-
+"""
+tgbot/keyboards.py
+====================
+Inline keyboard layouts for the BeeHive Monitor Telegram bot.
+"""
+
+from __future__ import annotations
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from config import TELEGRAM_PUBLIC_CHANNEL_LINK
+
+
+def main_menu(is_running: bool) -> InlineKeyboardMarkup:
+    """Primary member command center keyboard."""
+    status_icon = "🟢" if is_running else "🔴"
+    keyboard = [
+        [InlineKeyboardButton(f"{status_icon} Start Hive Monitor", callback_data="start_init_member")],
+        [InlineKeyboardButton("🛑 Stop Monitor", callback_data="stop_script_member")],
+        [InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration")],
+        [
+            InlineKeyboardButton("📄 Check Status", callback_data="status_check"),
+            InlineKeyboardButton("🔗 Join Channel", url=TELEGRAM_PUBLIC_CHANNEL_LINK),
+        ],
+        [
+            InlineKeyboardButton("📊 Hive Data (CSV)", callback_data="download_data_csv"),
+            InlineKeyboardButton("⚙️ Pi Health", callback_data="check_pi_health"),
+        ],
+        [
+            InlineKeyboardButton("🖥️ System Info", callback_data="system_info"),
+            InlineKeyboardButton("⏱️ Uptime", callback_data="uptime_info"),
+        ],
+        [InlineKeyboardButton("📈 Sensor Readings", callback_data="sensor_readings")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_to_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="main_menu")]])
+</file>
+
+<file path="utils/__init__.py">
+"""Utility subpackage: logging, calibration, CSV, ThingSpeak, network, watchdog."""
+</file>
+
+<file path="utils/calibration.py">
+# -*- coding: utf-8 -*-
+"""
+utils/calibration.py
+=====================
+Persistence for HX711 scale calibration (ratio, reference weight, and
+the Telegram user who performed the calibration) so the monitor can
+recover its calibration automatically after a reboot or restart.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from config import CALIBRATION_FILE, DEFAULT_CALIBRATION_WEIGHT_G
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+_lock = threading.Lock()
+
+
+@dataclass
+class CalibrationData:
+    weight_g: float = DEFAULT_CALIBRATION_WEIGHT_G
+    scale_ratio: float = 1.0
+    owner_id: Optional[int] = None
+    owner_name: str = "System"
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def load_calibration(path: Path = CALIBRATION_FILE) -> CalibrationData:
+    """Load calibration from disk, returning defaults if unavailable."""
+    with _lock:
+        if not path.exists():
+            return CalibrationData()
+        try:
+            with open(path, "r") as fh:
+                raw = json.load(fh)
+            return CalibrationData(
+                weight_g=float(raw.get("weight_g", DEFAULT_CALIBRATION_WEIGHT_G)),
+                scale_ratio=float(raw.get("scale_ratio", 1.0)),
+                owner_id=raw.get("owner_id") or raw.get("starter_id"),
+                owner_name=raw.get("owner_name") or raw.get("starter_name", "System"),
+                timestamp=raw.get("timestamp", ""),
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Failed to load calibration (%s), using defaults", exc)
+            return CalibrationData()
+
+
+def save_calibration(
+    weight_g: float,
+    scale_ratio: float,
+    owner_name: str = "System",
+    owner_id: Optional[int] = None,
+    path: Path = CALIBRATION_FILE,
+) -> None:
+    """Persist calibration data to disk."""
+    data = CalibrationData(
+        weight_g=float(weight_g),
+        scale_ratio=float(scale_ratio),
+        owner_id=owner_id,
+        owner_name=owner_name,
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    with _lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as fh:
+                json.dump(data.to_dict(), fh, indent=2)
+        except OSError as exc:
+            logger.error("Failed to persist calibration: %s", exc)
+</file>
+
+<file path="utils/csv_logger.py">
+# -*- coding: utf-8 -*-
+"""
+utils/csv_logger.py
+====================
+Thread-safe CSV logging of hive sensor readings.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import threading
+from pathlib import Path
+from typing import Any, Dict
+
+from config import HIVE_DATA_CSV
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_HEADERS = [
+    "Timestamp",
+    "Temperature (C)",
+    "Humidity (%)",
+    "Weight (g)",
+    "Frequency (Hz)",
+    "Behavior",
+    "Accel X",
+    "Accel Y",
+    "Accel Z",
+    "Gyro X",
+    "Gyro Y",
+    "Gyro Z",
+]
+
+_lock = threading.Lock()
+
+
+class CsvLogger:
+    """Appends hive sensor rows to a CSV file, creating headers once."""
+
+    def __init__(self, path: Path = HIVE_DATA_CSV) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_header_if_needed(self) -> None:
+        with _lock:
+            if not self.path.exists() or self.path.stat().st_size == 0:
+                try:
+                    with open(self.path, "w", newline="") as fh:
+                        csv.writer(fh).writerow(_HEADERS)
+                except OSError as exc:
+                    logger.error("Failed to write CSV header: %s", exc)
+
+    def log(self, data: Dict[str, Any], behavior: str = "") -> None:
+        """Append one row of sensor data to the CSV file."""
+        self.write_header_if_needed()
+        row = [
+            data.get("datestamp", ""),
+            data.get("temperature", ""),
+            data.get("humidity", ""),
+            data.get("weight", ""),
+            data.get("dominant_freq", ""),
+            behavior,
+            data.get("accel_x", ""),
+            data.get("accel_y", ""),
+            data.get("accel_z", ""),
+            data.get("gyro_x", ""),
+            data.get("gyro_y", ""),
+            data.get("gyro_z", ""),
+        ]
+        with _lock:
+            try:
+                with open(self.path, "a", newline="") as fh:
+                    csv.writer(fh).writerow(row)
+            except OSError as exc:
+                logger.error("Failed to append CSV row: %s", exc)
+
+    def exists(self) -> bool:
+        return self.path.exists() and self.path.stat().st_size > 0
+
+    def size_bytes(self) -> int:
+        try:
+            return os.path.getsize(self.path)
+        except OSError:
+            return 0
+</file>
+
+<file path="utils/logger.py">
+# -*- coding: utf-8 -*-
+"""
+utils/logger.py
+================
+Centralized, rotating, thread-safe logger configuration shared by every
+module in the project. Import `get_logger(__name__)` anywhere a logger
+is needed instead of calling `logging.basicConfig` repeatedly.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from logging.handlers import RotatingFileHandler
+from threading import Lock
+
+from config import APP_LOG_FILE, LOG_BACKUP_COUNT, LOG_LEVEL, LOG_MAX_BYTES
+
+_configured = False
+_lock = Lock()
+
+_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(threadName)s | %(message)s"
+
+
+def _configure_root() -> None:
+    global _configured
+    with _lock:
+        if _configured:
+            return
+        root = logging.getLogger()
+        root.setLevel(getattr(logging, LOG_LEVEL.upper(), logging.INFO))
+
+        formatter = logging.Formatter(_FORMAT)
+
+        file_handler = RotatingFileHandler(
+            APP_LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+
+        console_handler = logging.StreamHandler(stream=sys.stdout)
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
+
+        # Silence noisy third-party libraries a little.
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("telegram").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
+        _configured = True
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Return a module-level logger, configuring the root logger once."""
+    _configure_root()
+    return logging.getLogger(name)
+</file>
+
+<file path="utils/network.py">
+# -*- coding: utf-8 -*-
+"""
+utils/network.py
+=================
+Network hardening helpers: a pre-configured `requests.Session` with
+retry/backoff for transient failures (used by ThingSpeak and Telegram
+helpers), plus a generic retry decorator for arbitrary callables such
+as sensor reads that talk to hardware over I2C/SPI-like buses.
+"""
+
+from __future__ import annotations
+
+import functools
+import time
+from typing import Any, Callable, TypeVar
+
+import certifi
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from config import NETWORK_BACKOFF_BASE, NETWORK_BACKOFF_MAX, NETWORK_MAX_RETRIES
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+T = TypeVar("T")
+
+
+def build_http_session(
+    total: int = NETWORK_MAX_RETRIES, backoff: float = NETWORK_BACKOFF_BASE
+) -> requests.Session:
+    """Return a `requests.Session` configured with retry/backoff and a
+    trusted CA bundle, used for all outbound HTTP calls (ThingSpeak,
+    Telegram REST fallback, etc.)."""
+    retry = Retry(
+        total=total,
+        connect=total,
+        read=total,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.verify = certifi.where()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def retry_with_backoff(
+    max_attempts: int = NETWORK_MAX_RETRIES,
+    base_delay: float = NETWORK_BACKOFF_BASE,
+    max_delay: float = NETWORK_BACKOFF_MAX,
+    exceptions: tuple = (Exception,),
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator: retry a function call with exponential backoff.
+
+    Never raises after exhausting attempts when `default` is supplied
+    via functools.partial-style wrapping is not needed here -- callers
+    that want graceful degradation should catch the final exception.
+    """
+
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            attempt = 0
+            delay = base_delay
+            last_exc: Exception | None = None
+            while attempt < max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as exc:  # noqa: BLE001
+                    last_exc = exc
+                    attempt += 1
+                    logger.warning(
+                        "%s failed (attempt %d/%d): %s",
+                        func.__name__,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    if attempt >= max_attempts:
+                        break
+                    time.sleep(min(delay, max_delay))
+                    delay *= 2
+            assert last_exc is not None
+            raise last_exc
+
+        return wrapper
+
+    return decorator
+
+
+def is_internet_reachable(host: str = "https://api.telegram.org", timeout: float = 5.0) -> bool:
+    """Best-effort connectivity probe used after boot / outages."""
+    try:
+        requests.head(host, timeout=timeout, verify=certifi.where())
+        return True
+    except requests.RequestException:
+        return False
+
+
+def wait_for_internet(poll_interval: float = 5.0, max_wait: float | None = None) -> bool:
+    """Block until the internet becomes reachable (or max_wait elapses)."""
+    waited = 0.0
+    while not is_internet_reachable():
+        logger.warning("No internet connectivity detected, waiting %.1fs...", poll_interval)
+        time.sleep(poll_interval)
+        waited += poll_interval
+        if max_wait is not None and waited >= max_wait:
+            return False
+    return True
+</file>
+
+<file path="utils/thingspeak.py">
+# -*- coding: utf-8 -*-
+"""
+utils/thingspeak.py
+====================
+Resilient ThingSpeak uploader for the two channels used by the hive
+monitor: environment/motion, and weight/audio. Uses a retrying HTTP
+session and enforces ThingSpeak's minimum update interval.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any, Dict
+
+import requests
+
+from config import (
+    THINGSPEAK_ENV_MOTION_API_KEY,
+    THINGSPEAK_MIN_INTERVAL_S,
+    THINGSPEAK_RETRY_BACKOFF,
+    THINGSPEAK_RETRY_TOTAL,
+    THINGSPEAK_TIMEOUT_S,
+    THINGSPEAK_URL,
+    THINGSPEAK_WEIGHT_AUDIO_API_KEY,
+)
+from utils.logger import get_logger
+from utils.network import build_http_session
+
+logger = get_logger(__name__)
+
+
+class ThingSpeakUploader:
+    """Uploads sensor readings to two ThingSpeak channels with retry logic."""
+
+    def __init__(self) -> None:
+        self._session = build_http_session(
+            total=THINGSPEAK_RETRY_TOTAL, backoff=THINGSPEAK_RETRY_BACKOFF
+        )
+        self._lock = threading.Lock()
+        self._last_upload_ts = 0.0
+
+    def _throttle(self) -> None:
+        """Enforce ThingSpeak's minimum interval between updates."""
+        elapsed = time.time() - self._last_upload_ts
+        if elapsed < THINGSPEAK_MIN_INTERVAL_S:
+            time.sleep(THINGSPEAK_MIN_INTERVAL_S - elapsed)
+
+    def _post(self, payload: Dict[str, Any]) -> bool:
+        with self._lock:
+            self._throttle()
+            try:
+                resp = self._session.post(
+                    THINGSPEAK_URL, data=payload, timeout=THINGSPEAK_TIMEOUT_S
+                )
+                self._last_upload_ts = time.time()
+                if resp.status_code != 200 or resp.text.strip() == "0":
+                    logger.warning(
+                        "ThingSpeak upload rejected: status=%s body=%s",
+                        resp.status_code,
+                        resp.text[:150],
+                    )
+                    return False
+                return True
+            except requests.exceptions.Timeout:
+                logger.error("ThingSpeak upload timed out")
+                return False
+            except requests.exceptions.RequestException as exc:
+                logger.error("ThingSpeak upload failed: %s", exc)
+                return False
+
+    def upload_env_motion(self, sensor: Dict[str, Any]) -> bool:
+        payload = {
+            "api_key": THINGSPEAK_ENV_MOTION_API_KEY,
+            "field1": sensor.get("temperature"),
+            "field2": sensor.get("humidity"),
+            "field3": sensor.get("accel_x"),
+            "field4": sensor.get("accel_y"),
+            "field5": sensor.get("accel_z"),
+            "field6": sensor.get("gyro_x"),
+            "field7": sensor.get("gyro_y"),
+            "field8": sensor.get("gyro_z"),
+        }
+        return self._post(payload)
+
+    def upload_weight_audio(self, sensor: Dict[str, Any]) -> bool:
+        payload = {
+            "api_key": THINGSPEAK_WEIGHT_AUDIO_API_KEY,
+            "field1": sensor.get("weight"),
+            "field3": sensor.get("dominant_freq"),
+        }
+        return self._post(payload)
+
+    def upload_all(self, sensor: Dict[str, Any]) -> None:
+        """Upload both channels, logging (never raising) on failure."""
+        ok1 = self.upload_env_motion(sensor)
+        ok2 = self.upload_weight_audio(sensor)
+        if not (ok1 and ok2):
+            logger.warning("One or more ThingSpeak channel uploads failed this cycle")
+</file>
+
+<file path="utils/watchdog.py">
+# -*- coding: utf-8 -*-
+"""
+utils/watchdog.py
+==================
+Simple file-based heartbeat watchdog. The monitor loop touches a
+heartbeat file every cycle; an external systemd timer or cron job
+(see README.md) can check its age and restart the service if the
+monitor has hung, in addition to the in-process error recovery.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from config import WATCHDOG_HEARTBEAT_FILE, WATCHDOG_STALE_SECONDS
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class Heartbeat:
+    def __init__(self, path: Path = WATCHDOG_HEARTBEAT_FILE) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def beat(self) -> None:
+        try:
+            self.path.write_text(str(time.time()))
+        except OSError as exc:
+            logger.warning("Failed to write heartbeat: %s", exc)
+
+    def is_stale(self, max_age: float = WATCHDOG_STALE_SECONDS) -> bool:
+        if not self.path.exists():
+            return False
+        try:
+            last = float(self.path.read_text().strip())
+            return (time.time() - last) > max_age
+        except (OSError, ValueError):
+            return False
+
+    def age_seconds(self) -> float:
+        if not self.path.exists():
+            return -1.0
+        try:
+            last = float(self.path.read_text().strip())
+            return time.time() - last
+        except (OSError, ValueError):
+            return -1.0
+</file>
+
+<file path=".env.example">
+# BeeHive Monitor — Environment Variables
+# =========================================
+# Copy this file to .env and fill in real values.
+# The app reads these via environment variables (see config.py).
+#
+# On the Raspberry Pi, set these in the systemd override instead:
+#   sudo nano /etc/systemd/system/beehive.service.d/override.conf
+#
+# NEVER commit a .env file with real credentials to version control.
+
+# ----- Telegram -------------------------------------------------------
+BEEHIVE_TELEGRAM_TOKEN=123456789:REPLACE_WITH_YOUR_BOT_TOKEN
+BEEHIVE_ADMIN_ID=REPLACE_WITH_YOUR_NUMERIC_TELEGRAM_USER_ID
+BEEHIVE_CHANNEL=@YourChannelUsername
+BEEHIVE_CHANNEL_LINK=https://t.me/YourChannelUsername
+
+# ----- ThingSpeak -----------------------------------------------------
+# Channel 1: temperature, humidity, motion
+BEEHIVE_TS_ENV_KEY=REPLACE_WITH_ENV_MOTION_WRITE_KEY
+# Channel 2: weight, audio frequency
+BEEHIVE_TS_WA_KEY=REPLACE_WITH_WEIGHT_AUDIO_WRITE_KEY
+
+# ----- GPIO pins (defaults match README wiring) -----------------------
+# BEEHIVE_HX711_DOUT=5
+# BEEHIVE_HX711_SCK=6
+# BEEHIVE_DHT22_PIN=4
+# BEEHIVE_MPU_I2C_BUS=1
+# BEEHIVE_MPU_ADDR=104
+
+# ----- INMP441 I2S microphone -----------------------------------------
+# BEEHIVE_MIC_SAMPLE_RATE=44100
+# BEEHIVE_MIC_CHANNELS=1
+# BEEHIVE_MIC_DEVICE=
+# BEEHIVE_MIC_CAPTURE_SECONDS=2.0
+
+# ----- Alert thresholds -----------------------------------------------
+# BEEHIVE_ALERT_TEMP_HIGH=36.0
+# BEEHIVE_ALERT_TEMP_LOW=30.0
+# BEEHIVE_ALERT_HUMID_LOW=40.0
+# BEEHIVE_ALERT_HUMID_HIGH=70.0
+
+# ----- Logging --------------------------------------------------------
+# BEEHIVE_LOG_LEVEL=INFO
+</file>
+
+<file path="bot.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+bot.py
+======
+BeeHive Monitor Telegram bot entry point. Launches and controls
+`monitor.py` as a managed subprocess, provides a member command
+center with inline keyboards, and exposes Pi health/system info.
+
+Run directly (`python3 bot.py`) or via the provided systemd service.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+
+import certifi
+
+# Ensure TLS verification uses a trusted, up-to-date CA bundle even on
+# minimal Raspberry Pi OS images where the system store may be stale.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+from telegram import Update
+from telegram.error import NetworkError, TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
+from config import (
+    MEMBERS_FILE,
+    TELEGRAM_AUTHORIZED_USER_ID,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CONNECT_TIMEOUT,
+    TELEGRAM_LOG_CHANNEL,
+    TELEGRAM_POLL_TIMEOUT,
+    TELEGRAM_READ_TIMEOUT,
+)
+from tgbot import commands
+from tgbot.alerts import send_message
+from utils.logger import get_logger
+from utils.network import is_internet_reachable, wait_for_internet
+
+logger = get_logger(__name__)
+
+CALLBACK_PATTERN = (
+    "^(start_init_member|stop_script_member|status_check|change_calibration|"
+    "download_data_csv|check_pi_health|system_info|uptime_info|"
+    "sensor_readings|main_menu)$"
+)
+
+
+def _check_timesync_status() -> dict:
+    status = {"synced": False, "ntp": "unknown"}
+    try:
+        out = subprocess.check_output(
+            ["bash", "-lc", "timedatectl status"], timeout=6
+        ).decode()
+        lines = out.splitlines()
+        status["synced"] = any("System clock synchronized: yes" in ln for ln in lines)
+        status["ntp"] = "active" if any(
+            "NTP service: active" in ln or "systemd-timesyncd.service active: yes" in ln
+            for ln in lines
+        ) else "inactive"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("timedatectl status failed: %s", exc)
+    return status
+
+
+def _enable_timesync_best_effort() -> None:
+    for cmd in (
+        "sudo -n timedatectl set-ntp true",
+        "sudo -n systemctl restart systemd-timesyncd.service",
+    ):
+        try:
+            subprocess.check_call(["bash", "-lc", cmd], timeout=8)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NTP command failed (%s): %s", cmd, exc)
+
+
+def _ensure_time_sync_and_alert() -> None:
+    status = _check_timesync_status()
+    if not status["synced"]:
+        _enable_timesync_best_effort()
+        time.sleep(3.0)
+        status = _check_timesync_status()
+
+    if status["synced"]:
+        send_message(TELEGRAM_LOG_CHANNEL, f"🕒 *Time sync OK* — NTP: `{status['ntp']}`; clock synchronized.")
+    else:
+        send_message(
+            TELEGRAM_LOG_CHANNEL,
+            "⚠️ *Time sync NOT confirmed.*\n"
+            "Run the following commands and restart the bot:\n"
+            "`sudo timedatectl set-ntp true`\n"
+            "`sudo systemctl restart systemd-timesyncd`",
+        )
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Dispatcher error", exc_info=context.error)
+    try:
+        await context.bot.send_message(
+            chat_id=TELEGRAM_AUTHORIZED_USER_ID, text=f"❌ Bot error: {context.error}"
+        )
+        await context.bot.send_message(
+            chat_id=TELEGRAM_LOG_CHANNEL, text="⚠️ Network hiccup detected. Retrying …", parse_mode="Markdown"
+        )
+    except TelegramError:
+        pass
+    if isinstance(context.error, NetworkError):
+        time.sleep(5.0)
+
+
+def build_application() -> Application:
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .read_timeout(TELEGRAM_READ_TIMEOUT)
+        .connect_timeout(TELEGRAM_CONNECT_TIMEOUT)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", commands.start, filters=filters.ChatType.PRIVATE))
+    application.add_handler(
+        CommandHandler("channeltest", commands.channeltest, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(CallbackQueryHandler(commands.manage_script, pattern=CALLBACK_PATTERN))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, commands.handle_message)
+    )
+    application.add_error_handler(on_error)
+    return application
+
+
+def main() -> None:
+    logger.info("Starting BeeHive Monitor Telegram bot")
+
+    if not is_internet_reachable():
+        logger.warning("No internet detected at startup; waiting for connectivity...")
+        wait_for_internet()
+
+    _ensure_time_sync_and_alert()
+
+    if not MEMBERS_FILE.exists():
+        commands.save_members({})
+
+    application = build_application()
+
+    send_message(TELEGRAM_LOG_CHANNEL, "🤖 *BeeHive Monitor bot is online.*")
+    logger.info("Bot polling started")
+    application.run_polling(timeout=TELEGRAM_POLL_TIMEOUT, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="config.py">
+# -*- coding: utf-8 -*-
+"""
+config.py
+=========
+Central configuration for the BeeHive Monitor project.
+
+All secrets, GPIO pin assignments, thresholds, and tunable intervals
+live here so nothing is hard-coded anywhere else in the codebase.
+
+Values can be overridden with environment variables (useful for
+systemd `Environment=` directives or a `.env` file loaded by
+`install.sh`) while still falling back to sane defaults so the
+project runs out of the box.
+
+SECURITY NOTE:
+    The Telegram bot token and ThingSpeak API keys below were carried
+    over from the legacy scripts. Because they previously lived in
+    plain Python source that may have been shared or committed to a
+    repository, it is strongly recommended that you rotate them
+    (BotFather -> /revoke for Telegram, ThingSpeak channel settings
+    for the write keys) and then only ever set the new values through
+    environment variables, never by editing this file in place.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Final
+
+
+def _env(name: str, default: str) -> str:
+    """Return an environment variable, falling back to a default."""
+    value = os.environ.get(name)
+    return value if value not in (None, "") else default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# -------------------------------------------------------------------
+# Base paths
+# -------------------------------------------------------------------
+BASE_DIR: Final[Path] = Path(os.environ.get("BEEHIVE_HOME", Path(__file__).resolve().parent))
+LOG_DIR: Final[Path] = BASE_DIR / "logs"
+DATA_DIR: Final[Path] = BASE_DIR / "data"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+HIVE_DATA_CSV: Final[Path] = DATA_DIR / "hive_update.csv"
+CALIBRATION_FILE: Final[Path] = DATA_DIR / "calibration.json"
+MEMBERS_FILE: Final[Path] = DATA_DIR / "members.json"
+APP_LOG_FILE: Final[Path] = LOG_DIR / "beehive.log"
+
+# -------------------------------------------------------------------
+# Telegram
+# -------------------------------------------------------------------
+TELEGRAM_BOT_TOKEN: Final[str] = _env(
+    "BEEHIVE_TELEGRAM_TOKEN", "8280400805:AAFY5aIJ9jrPUi6G4YhwhUbXbDPi1EMMQDc"
+)
+TELEGRAM_AUTHORIZED_USER_ID: Final[int] = _env_int("BEEHIVE_ADMIN_ID", 5633775788)
+TELEGRAM_LOG_CHANNEL: Final[str] = _env("BEEHIVE_CHANNEL", "@MyHiveAlerts")
+TELEGRAM_PUBLIC_CHANNEL_LINK: Final[str] = _env(
+    "BEEHIVE_CHANNEL_LINK", "https://t.me/MyHiveAlerts"
+)
+TELEGRAM_READ_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_READ_TIMEOUT", 30)
+TELEGRAM_CONNECT_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_CONNECT_TIMEOUT", 20)
+TELEGRAM_POLL_TIMEOUT: Final[int] = _env_int("BEEHIVE_TG_POLL_TIMEOUT", 60)
+
+# -------------------------------------------------------------------
+# ThingSpeak
+# -------------------------------------------------------------------
+THINGSPEAK_URL: Final[str] = _env("BEEHIVE_TS_URL", "https://api.thingspeak.com/update")
+THINGSPEAK_ENV_MOTION_API_KEY: Final[str] = _env("BEEHIVE_TS_ENV_KEY", "5YCLLHKETJNYW9SL")
+THINGSPEAK_WEIGHT_AUDIO_API_KEY: Final[str] = _env("BEEHIVE_TS_WA_KEY", "4LFS7NGH9THTXTL6")
+THINGSPEAK_MIN_INTERVAL_S: Final[float] = _env_float("BEEHIVE_TS_MIN_INTERVAL", 15.0)
+THINGSPEAK_RETRY_TOTAL: Final[int] = _env_int("BEEHIVE_TS_RETRY_TOTAL", 4)
+THINGSPEAK_RETRY_BACKOFF: Final[float] = _env_float("BEEHIVE_TS_RETRY_BACKOFF", 1.5)
+THINGSPEAK_TIMEOUT_S: Final[int] = _env_int("BEEHIVE_TS_TIMEOUT", 20)
+
+# -------------------------------------------------------------------
+# GPIO / bus assignments
+# -------------------------------------------------------------------
+HX711_DOUT_PIN: Final[int] = _env_int("BEEHIVE_HX711_DOUT", 5)
+HX711_SCK_PIN: Final[int] = _env_int("BEEHIVE_HX711_SCK", 6)
+
+DHT22_PIN: Final[int] = _env_int("BEEHIVE_DHT22_PIN", 4)
+
+MPU6050_I2C_BUS: Final[int] = _env_int("BEEHIVE_MPU_I2C_BUS", 1)
+MPU6050_ADDR: Final[int] = _env_int("BEEHIVE_MPU_ADDR", 0x68)
+
+# INMP441 I2S MEMS microphone (native Raspberry Pi I2S, via sounddevice)
+INMP441_SAMPLE_RATE: Final[int] = _env_int("BEEHIVE_MIC_SAMPLE_RATE", 44100)
+INMP441_CHANNELS: Final[int] = _env_int("BEEHIVE_MIC_CHANNELS", 1)
+INMP441_DEVICE: Final[str] = _env("BEEHIVE_MIC_DEVICE", "")  # "" = sounddevice default
+INMP441_BLOCK_SIZE: Final[int] = _env_int("BEEHIVE_MIC_BLOCK_SIZE", 4096)
+INMP441_CAPTURE_SECONDS: Final[float] = _env_float("BEEHIVE_MIC_CAPTURE_SECONDS", 2.0)
+INMP441_DTYPE: Final[str] = _env("BEEHIVE_MIC_DTYPE", "int32")
+
+# -------------------------------------------------------------------
+# Acoustic analysis
+# -------------------------------------------------------------------
+FFT_BAND_LOW_HZ: Final[float] = _env_float("BEEHIVE_FFT_LOW", 100.0)
+FFT_BAND_HIGH_HZ: Final[float] = _env_float("BEEHIVE_FFT_HIGH", 800.0)
+FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 15.0)
+
+# -------------------------------------------------------------------
+# Alert thresholds
+# -------------------------------------------------------------------
+ALERT_FREQ_CHANGE_THRESHOLD: Final[float] = _env_float("BEEHIVE_ALERT_FREQ_DELTA", 20.0)
+ALERT_TEMP_HIGH: Final[float] = _env_float("BEEHIVE_ALERT_TEMP_HIGH", 36.0)
+ALERT_TEMP_LOW: Final[float] = _env_float("BEEHIVE_ALERT_TEMP_LOW", 30.0)
+ALERT_HUMID_LOW: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_LOW", 40.0)
+ALERT_HUMID_HIGH: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_HIGH", 70.0)
+
+WEIGHT_MIN_VALID: Final[float] = _env_float("BEEHIVE_WEIGHT_MIN", -50.0)
+WEIGHT_MAX_VALID: Final[float] = _env_float("BEEHIVE_WEIGHT_MAX", 5000.0)
+WEIGHT_SUDDEN_JUMP: Final[float] = _env_float("BEEHIVE_WEIGHT_JUMP", 300.0)
+
+ACCEL_Z_EXPECTED_G: Final[float] = _env_float("BEEHIVE_ACCEL_Z_EXPECTED", 1.0)
+ACCEL_Z_TOLERANCE: Final[float] = _env_float("BEEHIVE_ACCEL_Z_TOLERANCE", 0.25)
+GYRO_ABS_ALERT: Final[float] = _env_float("BEEHIVE_GYRO_ABS_ALERT", 120.0)
+
+MOTION_ACCEL_DELTA: Final[float] = _env_float("BEEHIVE_MOTION_ACCEL_DELTA", 0.20)
+MOTION_GYRO_DELTA: Final[float] = _env_float("BEEHIVE_MOTION_GYRO_DELTA", 50.0)
+
+# -------------------------------------------------------------------
+# Calibration
+# -------------------------------------------------------------------
+STABILITY_WINDOW_S: Final[float] = _env_float("BEEHIVE_STABILITY_WINDOW", 3.0)
+STABILITY_STD_THRESH: Final[float] = _env_float("BEEHIVE_STABILITY_STD", 1500.0)
+CALIBRATION_MAX_ITERATIONS: Final[int] = _env_int("BEEHIVE_CAL_MAX_ITER", 3)
+CALIBRATION_TOLERANCE: Final[float] = _env_float("BEEHIVE_CAL_TOLERANCE", 0.03)
+DEFAULT_CALIBRATION_WEIGHT_G: Final[float] = _env_float("BEEHIVE_DEFAULT_CAL_WEIGHT", 212.0)
+
+# -------------------------------------------------------------------
+# Monitor loop timing
+# -------------------------------------------------------------------
+MONITOR_CYCLE_SECONDS: Final[float] = _env_float("BEEHIVE_CYCLE_SECONDS", 25.0)
+MONITOR_IDLE_SLEEP: Final[float] = _env_float("BEEHIVE_IDLE_SLEEP", 0.1)
+
+# -------------------------------------------------------------------
+# Networking / retries
+# -------------------------------------------------------------------
+NETWORK_MAX_RETRIES: Final[int] = _env_int("BEEHIVE_NET_MAX_RETRIES", 5)
+NETWORK_BACKOFF_BASE: Final[float] = _env_float("BEEHIVE_NET_BACKOFF_BASE", 1.5)
+NETWORK_BACKOFF_MAX: Final[float] = _env_float("BEEHIVE_NET_BACKOFF_MAX", 60.0)
+
+# -------------------------------------------------------------------
+# Watchdog
+# -------------------------------------------------------------------
+WATCHDOG_HEARTBEAT_FILE: Final[Path] = DATA_DIR / "heartbeat.txt"
+WATCHDOG_STALE_SECONDS: Final[float] = _env_float("BEEHIVE_WATCHDOG_STALE", 180.0)
+
+# -------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------
+LOG_LEVEL: Final[str] = _env("BEEHIVE_LOG_LEVEL", "INFO")
+LOG_MAX_BYTES: Final[int] = _env_int("BEEHIVE_LOG_MAX_BYTES", 5 * 1024 * 1024)
+LOG_BACKUP_COUNT: Final[int] = _env_int("BEEHIVE_LOG_BACKUP_COUNT", 5)
+
+# -------------------------------------------------------------------
+# Process control (used by bot.py to launch/stop monitor.py)
+# -------------------------------------------------------------------
+MONITOR_SCRIPT: Final[Path] = BASE_DIR / "monitor.py"
+PYTHON_EXECUTABLE: Final[str] = _env("BEEHIVE_PYTHON", "python3")
+</file>
+
+<file path="enable_i2s.sh">
+#!/usr/bin/env bash
+# enable_i2s.sh
+# =============
+# Enables the native I2S peripheral on a Raspberry Pi 4 for the INMP441
+# MEMS microphone, replacing any analog/ADC microphone configuration.
+#
+# This adds the standard I2S MEMS microphone overlay to the boot
+# config so the device shows up as an ALSA capture device (verify
+# afterwards with `arecord -l` following a reboot).
+set -euo pipefail
+
+CONFIG_CANDIDATES=("/boot/firmware/config.txt" "/boot/config.txt")
+CONFIG_FILE=""
+for candidate in "${CONFIG_CANDIDATES[@]}"; do
+  if [[ -f "${candidate}" ]]; then
+    CONFIG_FILE="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${CONFIG_FILE}" ]]; then
+  echo "Could not locate config.txt (checked: ${CONFIG_CANDIDATES[*]})." >&2
+  echo "Please enable I2S manually for your OS image." >&2
+  exit 1
+fi
+
+echo "--> Using boot config: ${CONFIG_FILE}"
+
+add_line_if_missing() {
+  local line="$1"
+  if ! grep -qxF "${line}" "${CONFIG_FILE}"; then
+    echo "${line}" >> "${CONFIG_FILE}"
+    echo "    added: ${line}"
+  else
+    echo "    already present: ${line}"
+  fi
+}
+
+# Ensure the base I2S interface is on.
+add_line_if_missing "dtparam=i2s=on"
+
+# INMP441 is a standard I2S MEMS microphone; the googlevoicehat-soundcard
+# overlay is the well-supported community driver for generic I2S MEMS
+# mic breakout boards including the INMP441 (mono, left channel).
+add_line_if_missing "dtoverlay=googlevoicehat-soundcard"
+
+echo "--> I2S configuration written. A reboot is required for changes to take effect."
+echo "    After rebooting, verify with: arecord -l"
+</file>
+
+<file path="install.sh">
+#!/usr/bin/env bash
+# install.sh
+# ==========
+# One-shot installer for BeeHive Monitor on a Raspberry Pi 4 (Raspberry
+# Pi OS Bookworm or later). Installs system + Python dependencies,
+# enables I2C and I2S, sets up a Python virtual environment, and
+# installs/starts the systemd services for the monitor and the bot.
+#
+# Usage:
+#   cd BeeHiveMonitor
+#   chmod +x install.sh enable_i2s.sh
+#   ./install.sh
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${PROJECT_DIR}/venv"
+SERVICE_USER="${SUDO_USER:-$(whoami)}"
+
+echo "=============================================="
+echo " BeeHive Monitor Installer"
+echo " Project directory: ${PROJECT_DIR}"
+echo " Service user:      ${SERVICE_USER}"
+echo "=============================================="
+
+if [[ $EUID -ne 0 ]]; then
+  echo "This script must be run with sudo (needed for apt, I2C/I2S config, and systemd)." >&2
+  echo "Try: sudo ./install.sh" >&2
+  exit 1
+fi
+
+echo "--> Updating apt package index..."
+apt-get update -y
+
+echo "--> Installing system packages..."
+apt-get install -y \
+  python3 python3-venv python3-pip python3-dev \
+  i2c-tools libatlas-base-dev \
+  portaudio19-dev libportaudio2 libasound2-dev \
+  git build-essential
+
+echo "--> Enabling I2C interface (for MPU6050)..."
+if command -v raspi-config >/dev/null 2>&1; then
+  raspi-config nonint do_i2c 0 || true
+else
+  echo "raspi-config not found; ensure 'dtparam=i2c_arm=on' is set in /boot/firmware/config.txt manually."
+fi
+
+echo "--> Configuring I2S (for INMP441)..."
+bash "${PROJECT_DIR}/enable_i2s.sh"
+
+echo "--> Creating Python virtual environment..."
+python3 -m venv "${VENV_DIR}"
+"${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
+"${VENV_DIR}/bin/pip" install -r "${PROJECT_DIR}/requirements.txt"
+
+echo "--> Creating data/logs directories..."
+mkdir -p "${PROJECT_DIR}/data" "${PROJECT_DIR}/logs"
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${PROJECT_DIR}"
+
+echo "--> Installing systemd service (bot.py manages monitor.py as a subprocess)..."
+SERVICE_SRC="${PROJECT_DIR}/services/beehive.service"
+SERVICE_DST="/etc/systemd/system/beehive.service"
+
+sed \
+  -e "s#__PROJECT_DIR__#${PROJECT_DIR}#g" \
+  -e "s#__VENV_DIR__#${VENV_DIR}#g" \
+  -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
+  "${SERVICE_SRC}" > "${SERVICE_DST}"
+
+systemctl daemon-reload
+systemctl enable beehive.service
+systemctl restart beehive.service
+
+echo "=============================================="
+echo " Installation complete."
+echo " Check status with: sudo systemctl status beehive.service"
+echo " Tail logs with:    journalctl -u beehive.service -f"
+echo "                     or tail -f ${PROJECT_DIR}/logs/beehive.log"
+echo ""
+echo " IMPORTANT: A reboot is required for I2S/I2C overlay changes"
+echo " to take full effect if this is the first install:"
+echo "   sudo reboot"
+echo "=============================================="
+</file>
+
+<file path="monitor.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+monitor.py
+==========
+Main hive monitoring loop. Reads the HX711 load cell, DHT22, MPU6050,
+and INMP441 (I2S) sensors on a fixed cycle, classifies bee acoustic
+behaviour, evaluates alert rules, logs to CSV, uploads to ThingSpeak,
+and posts a formatted hive update plus any alerts to the Telegram
+channel.
+
+Invoked either directly:
+    python3 monitor.py [calibration_weight_g] [starter_name] [starter_id]
+
+or with no arguments, in which case it recovers the last persisted
+calibration automatically (post-reboot recovery).
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+import traceback
+
+import certifi
+
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+from config import (
+    DEFAULT_CALIBRATION_WEIGHT_G,
+    MONITOR_CYCLE_SECONDS,
+    MONITOR_IDLE_SLEEP,
+    TELEGRAM_LOG_CHANNEL,
+)
+from sensors.dht22_sensor import Dht22Sensor
+from sensors.hx711_sensor import HX711Sensor
+from sensors.inmp441_sensor import Inmp441Sensor
+from sensors.mpu6050_sensor import Mpu6050Sensor
+from tgbot.alerts import AlertContext, build_alerts, send_data_and_alerts, send_message
+from utils.calibration import load_calibration
+from utils.csv_logger import CsvLogger
+from utils.logger import get_logger
+from utils.network import wait_for_internet
+from utils.thingspeak import ThingSpeakUploader
+from utils.watchdog import Heartbeat
+
+logger = get_logger(__name__)
+
+_shutdown_requested = False
+
+
+def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
+    global _shutdown_requested
+    logger.info("Received signal %s, shutting down gracefully...", signum)
+    _shutdown_requested = True
+
+
+def _build_hive_update_message(sensor: dict, behavior: str) -> str:
+    return f"""
+🐝 *HIVE UPDATE* 🐝
+🕑 *Time:* `{sensor['datestamp']}`
+🔊 *Acoustics*
+├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`
+└ Behavior: *{behavior}*
+🌡️ *Environment*
+├ Temperature: `{sensor['temperature']:.1f} °C`
+└ Humidity: `{sensor['humidity']:.1f} %`
+⚖️ *Weight*
+└ Current: `{sensor['weight']:.2f} g`
+📈 *Motion (Accel)*
+├ Ax: `{sensor['accel_x']:.2f} g`
+├ Ay: `{sensor['accel_y']:.2f} g`
+└ Az: `{sensor['accel_z']:.2f} g`
+🌀 *Rotation (Gyro)*
+├ Gx: `{sensor['gyro_x']:.1f}`
+├ Gy: `{sensor['gyro_y']:.1f}`
+└ Gz: `{sensor['gyro_z']:.1f}`
+""".strip()
+
+
+def _parse_args() -> tuple[float, str, str]:
+    if len(sys.argv) >= 4:
+        try:
+            return float(sys.argv[1]), sys.argv[2], sys.argv[3]
+        except ValueError:
+            logger.warning("Invalid CLI calibration args, falling back to persisted calibration")
+    cal = load_calibration()
+    return cal.weight_g, cal.owner_name, str(cal.owner_id or "N/A")
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    init_weight, starter_name, starter_id = _parse_args()
+
+    logger.info("Initializing sensors...")
+    hx711 = HX711Sensor(notify=lambda msg: send_message(TELEGRAM_LOG_CHANNEL, msg))
+    mpu6050 = Mpu6050Sensor()
+    dht22 = Dht22Sensor()
+    inmp441 = Inmp441Sensor()
+
+    csv_logger = CsvLogger()
+    thingspeak = ThingSpeakUploader()
+    heartbeat = Heartbeat()
+
+    wait_for_internet(max_wait=30.0)
+
+    owner_id = int(starter_id) if str(starter_id).isdigit() else None
+    hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
+
+    send_message(TELEGRAM_LOG_CHANNEL, f"🚀 *Started* by {starter_name}")
+    send_message(TELEGRAM_LOG_CHANNEL, "✅ Hive Monitor is online. If you see this, channel posting works.")
+    csv_logger.write_header_if_needed()
+
+    ctx = AlertContext()
+    last_cycle = 0.0
+
+    logger.info("Entering monitor loop (cycle=%.1fs)", MONITOR_CYCLE_SECONDS)
+    try:
+        while not _shutdown_requested:
+            now = time.time()
+            if now - last_cycle >= MONITOR_CYCLE_SECONDS:
+                try:
+                    _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Unhandled error during monitor cycle: %s\n%s", exc, traceback.format_exc())
+                    # Never crash: log, alert, and continue on the next cycle.
+                    send_message(TELEGRAM_LOG_CHANNEL, f"⚠️ *Monitor cycle error (recovered):* `{exc}`")
+                finally:
+                    last_cycle = now
+                    heartbeat.beat()
+            time.sleep(MONITOR_IDLE_SLEEP)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("Monitor stopping")
+        send_message(TELEGRAM_LOG_CHANNEL, "🛑 *Stopped*")
+
+
+def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: AlertContext) -> None:
+    from datetime import datetime
+
+    weight = hx711.read_weight_robust()
+    climate = dht22.read_median()
+    imu = mpu6050.read()
+    acoustic = inmp441.read()
+
+    sensor = {
+        "datestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "weight": round(weight, 2),
+        "temperature": climate.temperature_c,
+        "humidity": climate.humidity_pct,
+        "dominant_freq": round(acoustic.dominant_freq_hz, 2),
+        "accel_x": imu.accel_x, "accel_y": imu.accel_y, "accel_z": imu.accel_z,
+        "gyro_x": imu.gyro_x, "gyro_y": imu.gyro_y, "gyro_z": imu.gyro_z,
+    }
+
+    if not acoustic.available:
+        logger.warning("INMP441 microphone unavailable this cycle; frequency reported as 0.0")
+
+    alerts, behavior = build_alerts(sensor, sensor["dominant_freq"], ctx)
+
+    message = _build_hive_update_message(sensor, behavior)
+    send_data_and_alerts(TELEGRAM_LOG_CHANNEL, message, alerts)
+
+    csv_logger.log(sensor, behavior=behavior)
+    thingspeak.upload_all(sensor)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="README.md">
+# BeeHive Monitor
+
+A production-ready Raspberry Pi 4 hive monitoring system: acoustic bee
+behaviour classification, weight, temperature/humidity, and motion
+sensing, with Telegram control and ThingSpeak dashboards.
+
+## Hardware
+
+| Sensor  | Purpose                        | Interface        |
+|---------|---------------------------------|-------------------|
+| HX711   | Load cell (hive weight)         | 2-wire (DOUT/SCK) |
+| DHT22   | Temperature & humidity          | 1-wire GPIO       |
+| MPU6050 | Accelerometer / gyroscope       | I2C               |
+| INMP441 | MEMS microphone (bee acoustics) | I2S (native)      |
+
+No analog microphone circuitry, MCP3008 ADC, TL072 op-amp, or ADS1115
+ADC is used anywhere in this project -- the INMP441 is a digital I2S
+device read directly by the Pi's native I2S peripheral via
+`sounddevice`/PortAudio.
+
+### Default pin assignments (override via environment variables, see `config.py`)
+
+- HX711: `DOUT` -> GPIO5, `SCK` -> GPIO6
+- DHT22: data -> GPIO4
+- MPU6050: I2C bus 1 (SDA/SCL), address `0x68`
+- INMP441: `SD` -> GPIO20 (I2S DIN), `WS` -> GPIO19 (I2S LRCLK), `SCK` -> GPIO18 (I2S BCLK), `L/R` -> GND (left channel), `VDD` -> 3.3V, `GND` -> GND
+
+## Project layout
+
+```
+BeeHiveMonitor/
+├── monitor.py            # sensor loop, alerts, CSV, ThingSpeak, Telegram posting
+├── bot.py                 # Telegram bot: control panel, health, calibration
+├── config.py               # all configuration, secrets, thresholds, GPIO pins
+├── requirements.txt
+├── install.sh              # one-shot Raspberry Pi installer (apt + venv + systemd)
+├── enable_i2s.sh            # configures native I2S for the INMP441
+├── services/beehive.service  # systemd unit template
+├── audio/                   # I2S capture, filtering, FFT
+│   ├── capture.py
+│   ├── fft.py
+│   └── filters.py
+├── sensors/                  # per-sensor drivers
+│   ├── hx711_sensor.py
+│   ├── mpu6050_sensor.py
+│   ├── dht22_sensor.py
+│   └── inmp441_sensor.py
+├── tgbot/                     # Telegram integration (named to avoid
+│   │                            shadowing the python-telegram-bot package)
+│   ├── alerts.py
+│   ├── commands.py
+│   └── keyboards.py
+├── utils/                      # logging, calibration, CSV, ThingSpeak, network, watchdog
+├── tests/                       # unit tests (hardware-free, run anywhere)
+└── logs/
+```
+
+## Installation
+
+```bash
+git clone <this-repo> BeeHiveMonitor   # or copy the extracted folder to the Pi
+cd BeeHiveMonitor
+chmod +x install.sh enable_i2s.sh
+sudo ./install.sh
+sudo reboot   # required the first time, for I2C/I2S overlay changes
+```
+
+`install.sh` will:
+
+1. Install system packages (`i2c-tools`, PortAudio, build tools, etc.)
+2. Enable I2C (`raspi-config nonint do_i2c 0`)
+3. Run `enable_i2s.sh` to add the I2S microphone overlay to
+   `/boot/firmware/config.txt`
+4. Create a Python virtual environment and install `requirements.txt`
+5. Install and enable `beehive.service` (runs `bot.py`, which launches
+   `monitor.py` as a managed subprocess)
+
+After rebooting, verify the microphone is visible with `arecord -l`.
+
+## Configuration & secrets
+
+All configuration lives in `config.py` and can be overridden with
+environment variables (see the top of that file for the full list),
+which is the recommended way to set secrets rather than editing the
+file directly, e.g. in `/etc/systemd/system/beehive.service.d/override.conf`:
+
+```ini
+[Service]
+Environment=BEEHIVE_TELEGRAM_TOKEN=123456:your-new-token
+Environment=BEEHIVE_ADMIN_ID=111111111
+Environment=BEEHIVE_TS_ENV_KEY=your-thingspeak-write-key
+Environment=BEEHIVE_TS_WA_KEY=your-other-thingspeak-write-key
+```
+
+**Rotate your credentials.** The Telegram bot token and ThingSpeak
+write keys carried over from the legacy scripts were previously stored
+in plain Python source. Generate new ones (BotFather `/revoke`,
+ThingSpeak channel API settings) and set them only via environment
+variables or a systemd override, never by committing them to source
+control.
+
+## Telegram bot
+
+`/start` opens the member command center:
+
+- Start / Stop the monitor
+- Change calibration (guided, weight-based)
+- Check status, Pi health (CPU temp/usage, memory, disk, uptime),
+  system info
+- View latest sensor readings
+- Download the CSV log
+
+Membership is controlled via `data/members.json` (Telegram user IDs);
+the configured `BEEHIVE_ADMIN_ID` always has full access.
+
+## Recovery & reliability
+
+- **Network retries**: ThingSpeak and Telegram calls use a retrying
+  HTTP session with exponential backoff (`utils/network.py`).
+- **Sensor failures**: each sensor module degrades to a safe default
+  (0.0 / not-available) rather than crashing, and automatically
+  retries hardware connections on the next cycle (I2C, HX711, I2S).
+- **Reboot recovery**: calibration is persisted to `data/calibration.json`
+  and reloaded automatically if `monitor.py` is started with no
+  arguments.
+- **Internet outage recovery**: `monitor.py` and `bot.py` wait for
+  connectivity at startup and continue looping through outages,
+  logging and alerting rather than crashing.
+- **Watchdog**: `monitor.py` writes a heartbeat file each cycle
+  (`utils/watchdog.py`); pair this with a cron job or systemd timer
+  that restarts `beehive.service` if the heartbeat goes stale for
+  longer than `BEEHIVE_WATCHDOG_STALE` seconds (default 180s).
+- **Process supervision**: `beehive.service` uses `Restart=on-failure`
+  so the bot (and therefore the ability to restart the monitor) comes
+  back automatically after a crash or reboot.
+
+## Running tests
+
+```bash
+source venv/bin/activate
+python -m pytest tests/ -v
+```
+
+All tests run without any Raspberry Pi hardware attached -- each
+hardware interface is faked/mocked.
+
+## Manual run (development)
+
+```bash
+source venv/bin/activate
+python3 bot.py
+```
+
+`monitor.py` is normally launched by the bot, but can also be run
+directly for debugging:
+
+```bash
+python3 monitor.py 650 "Dev User" 123456789
+```
+</file>
+
+<file path="requirements.txt">
+# Core
+numpy>=1.26,<2.0
+scipy>=1.11
+certifi>=2024.2.2
+requests>=2.31
+psutil>=5.9
+
+# Telegram bot (async v20+ API)
+python-telegram-bot>=20.7,<21.0
+
+# Hardware interfaces
+RPi.GPIO>=0.7.1 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+smbus2>=0.4.3
+hx711>=1.1.2.3
+
+# DHT22 (actively maintained CircuitPython driver + board pin definitions)
+adafruit-circuitpython-dht>=4.0.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+adafruit-blinka>=8.20.0 ; platform_machine == "armv7l" or platform_machine == "aarch64"
+
+# INMP441 I2S microphone capture (native I2S via PortAudio, no ADC/SPI)
+sounddevice>=0.4.6
+</file>
+
+<file path=".gitignore">
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment / secrets — NEVER commit real credentials
+.env
+*.env
+
+# Runtime data (auto-generated by the app)
+data/
+logs/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# pytest
+.pytest_cache/
+
+# Secrets file - NEVER push to git
+token.md
+</file>
+
+<file path="instructions.md">
+# BeeHive Monitor — Full Deployment Instructions
+## Raspberry Pi 4 · Debian Bookworm 64-bit (Headless) · Via PuTTY
+
+> **Read everything in a section before typing any command.**
+> Lines starting with `$` are commands you type in PuTTY.
+> Lines starting with `#` inside code blocks are comments — do NOT type them.
+
+---
+
+## Table of Contents
+
+1. [Codebase Overview](#1-codebase-overview)
+2. [Pre-Requisites (on your Windows PC)](#2-pre-requisites-on-your-windows-pc)
+3. [First Boot and PuTTY Connection](#3-first-boot-and-putty-connection)
+4. [Update the System](#4-update-the-system)
+5. [Transfer Project Files to the Pi](#5-transfer-project-files-to-the-pi)
+6. [Create the Python Virtual Environment (venv)](#6-create-the-python-virtual-environment-venv)
+7. [Set Your Secrets (Telegram and ThingSpeak)](#7-set-your-secrets-telegram-and-thingspeak)
+8. [Enable I2C and I2S Hardware Interfaces](#8-enable-i2c-and-i2s-hardware-interfaces)
+9. [Install and Start the systemd Service](#9-install-and-start-the-systemd-service)
+10. [Verify Everything Works](#10-verify-everything-works)
+11. [Running Tests (Optional)](#11-running-tests-optional)
+12. [Manual Debug Run](#12-manual--debug-run)
+13. [Useful Day-to-Day Commands](#13-useful-day-to-day-commands)
+14. [File Reference](#14-file-reference)
+15. [Troubleshooting](#15-troubleshooting)
+
+---
+
+## 1. Codebase Overview
+
+```
+BeeHiveMonitor/
+├── monitor.py            <- sensor loop, CSV, ThingSpeak, Telegram posts
+├── bot.py                <- Telegram bot; launches monitor.py as subprocess
+├── config.py             <- ALL config and secrets (override via env vars)
+├── requirements.txt      <- Python dependencies
+├── install.sh            <- one-shot installer (runs steps 6-9 automatically)
+├── enable_i2s.sh         <- adds I2S mic overlay to /boot/firmware/config.txt
+├── services/
+│   └── beehive.service   <- systemd unit template
+├── audio/                <- I2S capture, FFT, bandpass filters
+├── sensors/              <- per-sensor drivers (HX711, DHT22, MPU6050, INMP441)
+├── tgbot/                <- Telegram alerts, commands, keyboards
+├── utils/                <- logging, CSV, ThingSpeak, network, watchdog, calibration
+├── tests/                <- hardware-free pytest suite
+└── logs/                 <- runtime log files (auto-created)
+```
+
+### Hardware wired to the Pi
+
+| Sensor  | What it measures         | Interface                           |
+|---------|--------------------------|-------------------------------------|
+| HX711   | Hive weight (load cell)  | GPIO 5 (DOUT) / GPIO 6 (SCK)       |
+| DHT22   | Temperature and humidity | GPIO 4                              |
+| MPU6050 | Vibration / tilt         | I2C bus 1 (SDA GPIO2 / SCL GPIO3)  |
+| INMP441 | Bee acoustics (I2S mic)  | GPIO 18/19/20, L/R -> GND, VDD 3.3V|
+
+> All GPIO pin numbers can be changed via environment variables in
+> `/etc/systemd/system/beehive.service.d/override.conf` (see section 7).
+
+---
+
+## 2. Pre-Requisites (on your Windows PC)
+
+### 2.1 Install PuTTY
+
+Download from https://www.putty.org and install it.
+
+### 2.2 Install WinSCP (file transfer)
+
+Download from https://winscp.net — you will use it to copy the project folder to the Pi.
+
+### 2.3 Flash Raspberry Pi OS Bookworm (Lite, 64-bit)
+
+1. Download **Raspberry Pi Imager**: https://www.raspberrypi.com/software/
+2. Choose OS -> **Raspberry Pi OS (other)** -> **Raspberry Pi OS Lite (64-bit)**
+3. Before writing, click the gear icon and:
+   - Set **hostname**: e.g. `beehive`
+   - Enable **SSH** (password or key)
+   - Set **username / password** (e.g. `pi` / your chosen password)
+   - Set **Wi-Fi** SSID and password (if using Wi-Fi)
+4. Write to SD card -> insert into Pi -> power on.
+
+### 2.4 Find the Pi's IP address
+
+On your router admin page look for `beehive` or use **Advanced IP Scanner**
+(https://www.advanced-ip-scanner.com/).
+
+---
+
+## 3. First Boot and PuTTY Connection
+
+1. Open **PuTTY**.
+2. In **Host Name (or IP address)** enter the Pi's IP (e.g. `192.168.1.50`).
+3. **Port**: `22`, **Connection type**: SSH.
+4. Click **Open** -> accept the host key fingerprint -> log in with your username/password.
+
+You should see a prompt like:
+
+```
+pi@beehive:~$
+```
+
+---
+
+## 4. Update the System
+
+Run these commands **one at a time** and wait for each to finish:
+
+```bash
+$ sudo apt-get update -y
+$ sudo apt-get upgrade -y
+$ sudo apt-get autoremove -y
+```
+
+> This can take 5-15 minutes on first boot. Do not close PuTTY.
+
+---
+
+## 5. Transfer Project Files to the Pi
+
+### Option A — WinSCP (recommended for beginners)
+
+1. Open **WinSCP** -> **New Site**.
+2. **File protocol**: SFTP · **Host name**: Pi's IP · **User name / Password**: same as PuTTY.
+3. Click **Login**.
+4. On the **right** panel navigate to `/home/pi/`.
+5. On the **left** panel navigate to your Windows folder containing `BeeHiveMonitor`.
+6. Drag the entire `BeeHiveMonitor` folder to the right panel.
+7. Wait for the transfer to complete.
+
+### Option B — Git (if the repo is on GitHub)
+
+```bash
+$ cd ~
+$ sudo apt-get install -y git
+$ git clone https://github.com/YOUR_USERNAME/BeeHiveMonitor.git BeeHiveMonitor
+```
+
+Replace the URL with your actual repository URL.
+
+### Verify the transfer
+
+```bash
+$ ls ~/BeeHiveMonitor
+```
+
+You should see: `monitor.py  bot.py  config.py  requirements.txt  install.sh  ...`
+
+---
+
+## 6. Create the Python Virtual Environment (venv)
+
+### Step 6.1 — Install system dependencies
+
+```bash
+$ sudo apt-get install -y \
+    python3 python3-venv python3-pip python3-dev \
+    i2c-tools libatlas-base-dev \
+    portaudio19-dev libportaudio2 libasound2-dev \
+    git build-essential
+```
+
+### Step 6.2 — Navigate to the project directory
+
+```bash
+$ cd ~/BeeHiveMonitor
+```
+
+### Step 6.3 — Create the virtual environment
+
+```bash
+$ python3 -m venv venv
+```
+
+This creates a `venv/` folder inside the project. Takes about 30 seconds.
+
+### Step 6.4 — Activate the virtual environment
+
+```bash
+$ source venv/bin/activate
+```
+
+Your prompt changes to:
+
+```
+(venv) pi@beehive:~/BeeHiveMonitor$
+```
+
+> Every time you open a new PuTTY session and want to run the project manually,
+> you must run this activate command again.
+
+### Step 6.5 — Upgrade pip and install requirements
+
+```bash
+$ pip install --upgrade pip setuptools wheel
+$ pip install -r requirements.txt
+```
+
+> This installs numpy, scipy, python-telegram-bot, RPi.GPIO, smbus2, hx711,
+> sounddevice, and all other dependencies. Takes 3-10 minutes.
+> Watch for any red ERROR lines.
+
+### Step 6.6 — Deactivate (when done with manual work)
+
+```bash
+$ deactivate
+```
+
+---
+
+## 7. Set Your Secrets (Telegram and ThingSpeak)
+
+> NEVER edit config.py to put in real tokens. Use a systemd override file instead.
+> This keeps secrets out of the source code.
+
+### Step 7.1 — Get your Telegram bot token
+
+1. Open Telegram -> search for **@BotFather**.
+2. Send `/newbot` (or `/revoke` to rotate an existing token).
+3. Follow the prompts -> copy the token (e.g. `123456789:ABCDEFGxyz...`).
+
+### Step 7.2 — Get your Telegram user ID
+
+1. Search for **@userinfobot** in Telegram -> send `/start`.
+2. It replies with your numeric user ID (e.g. `5633775788`).
+
+### Step 7.3 — Set up ThingSpeak channels and get write keys
+
+This project uses **two separate ThingSpeak channels**. You must create both.
+
+---
+
+#### Channel 1 — Environment & Motion  (key: `BEEHIVE_TS_ENV_KEY`)
+
+Log in at https://thingspeak.mathworks.com → **New Channel**, name it e.g. `BeeHive - Env & Motion`.
+
+Set the fields **exactly** in this order (the field numbers must match):
+
+| Field # | Name to enter in ThingSpeak | What it contains        |
+|---------|-----------------------------|-------------------------|
+| Field 1 | `Temperature`               | °C from DHT22           |
+| Field 2 | `Humidity`                  | % from DHT22            |
+| Field 3 | `Accel X`                   | g — MPU6050 X-axis      |
+| Field 4 | `Accel Y`                   | g — MPU6050 Y-axis      |
+| Field 5 | `Accel Z`                   | g — MPU6050 Z-axis      |
+| Field 6 | `Gyro X`                    | °/s — MPU6050 X-axis    |
+| Field 7 | `Gyro Y`                    | °/s — MPU6050 Y-axis    |
+| Field 8 | `Gyro Z`                    | °/s — MPU6050 Z-axis    |
+
+Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_ENV_KEY`.
+
+---
+
+#### Channel 2 — Weight & Audio  (key: `BEEHIVE_TS_WA_KEY`)
+
+Create a second channel, name it e.g. `BeeHive - Weight & Audio`.
+
+Set the fields **exactly** in this order:
+
+| Field # | Name to enter in ThingSpeak | What it contains                |
+|---------|-----------------------------|---------------------------------|
+| Field 1 | `Weight`                    | grams from HX711 load cell      |
+| Field 3 | `Dominant Frequency`        | Hz — dominant bee sound from INMP441 FFT |
+
+> Field 2 is intentionally skipped — the code uploads to field1 and field3 only.
+
+Save the channel → go to **API Keys** tab → copy the **Write API Key** → this is your `BEEHIVE_TS_WA_KEY`.
+
+---
+
+### Step 7.4 — Create the systemd override directory
+
+```bash
+$ sudo mkdir -p /etc/systemd/system/beehive.service.d
+```
+
+### Step 7.5 — Write the secrets override file
+
+Open nano to create the file:
+
+```bash
+$ sudo nano /etc/systemd/system/beehive.service.d/override.conf
+```
+
+Inside nano, type exactly this (replace every placeholder value):
+
+```
+[Service]
+Environment=BEEHIVE_TELEGRAM_TOKEN=123456789:YOUR_REAL_BOT_TOKEN_HERE
+Environment=BEEHIVE_ADMIN_ID=YOUR_NUMERIC_TELEGRAM_USER_ID
+Environment=BEEHIVE_CHANNEL=@YourChannelUsername
+Environment=BEEHIVE_CHANNEL_LINK=https://t.me/YourChannelUsername
+Environment=BEEHIVE_TS_ENV_KEY=YOUR_THINGSPEAK_ENV_MOTION_WRITE_KEY
+Environment=BEEHIVE_TS_WA_KEY=YOUR_THINGSPEAK_WEIGHT_AUDIO_WRITE_KEY
+```
+
+To save in nano:
+- Press Ctrl + O then press Enter to confirm the filename
+- Press Ctrl + X to exit
+
+### Step 7.6 — Verify the file was saved
+
+```bash
+$ sudo cat /etc/systemd/system/beehive.service.d/override.conf
+```
+
+You should see your values printed back.
+
+---
+
+## 8. Enable I2C and I2S Hardware Interfaces
+
+### Step 8.1 — Make scripts executable
+
+```bash
+$ cd ~/BeeHiveMonitor
+$ chmod +x install.sh enable_i2s.sh
+```
+
+### Step 8.2 — Enable I2C (for MPU6050)
+
+```bash
+$ sudo raspi-config nonint do_i2c 0
+```
+
+Verify I2C is enabled:
+
+```bash
+$ ls /dev/i2c*
+```
+
+You should see `/dev/i2c-1`.
+
+### Step 8.3 — Enable I2S (for INMP441 microphone)
+
+```bash
+$ sudo bash ~/BeeHiveMonitor/enable_i2s.sh
+```
+
+This adds two lines to `/boot/firmware/config.txt`:
+
+```
+dtparam=i2s=on
+dtoverlay=googlevoicehat-soundcard
+```
+
+Verify they were added:
+
+```bash
+$ grep -E "i2s|googlevoicehat" /boot/firmware/config.txt
+```
+
+### Step 8.4 — Reboot (REQUIRED after enabling I2C and I2S)
+
+```bash
+$ sudo reboot
+```
+
+PuTTY will disconnect. Wait 60 seconds, then reconnect via PuTTY.
+
+### Step 8.5 — Verify the microphone is visible
+
+After reconnecting:
+
+```bash
+$ arecord -l
+```
+
+You should see something like:
+
+```
+card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: ...
+```
+
+If you see nothing, refer to section 15 Troubleshooting.
+
+### Step 8.6 — Verify I2C devices are detected
+
+```bash
+$ sudo i2cdetect -y 1
+```
+
+You should see `68` in the grid (MPU6050 at address 0x68).
+
+---
+
+## 9. Install and Start the systemd Service
+
+Run the one-shot installer as root:
+
+```bash
+$ cd ~/BeeHiveMonitor
+$ sudo ./install.sh
+```
+
+This script will:
+1. Re-run apt-get update and install any missing system packages
+2. Re-enable I2C / run enable_i2s.sh
+3. Create/update the Python venv and install requirements.txt
+4. Create data/ and logs/ directories
+5. Copy services/beehive.service to /etc/systemd/system/beehive.service (with paths filled in)
+6. Run systemctl daemon-reload, systemctl enable, systemctl restart
+
+### Step 9.1 — Reload systemd to pick up the override file
+
+```bash
+$ sudo systemctl daemon-reload
+```
+
+### Step 9.2 — Enable and start the service
+
+```bash
+$ sudo systemctl enable beehive.service
+$ sudo systemctl start beehive.service
+```
+
+### Step 9.3 — Check the service status
+
+```bash
+$ sudo systemctl status beehive.service
+```
+
+You should see Active: active (running) in green. Press Q to exit.
+
+---
+
+## 10. Verify Everything Works
+
+### Step 10.1 — Watch live logs
+
+```bash
+$ journalctl -u beehive.service -f
+```
+
+Press Ctrl + C to stop. Look for lines like:
+
+```
+INFO  bot.py: Bot started, waiting for commands...
+INFO  monitor.py: Cycle complete — weight=X.Xg temp=XX.X°C ...
+```
+
+### Step 10.2 — Watch the application log file
+
+```bash
+$ tail -f ~/BeeHiveMonitor/logs/beehive.log
+```
+
+Press Ctrl + C to stop.
+
+### Step 10.3 — Test the Telegram bot
+
+Open Telegram -> find your bot -> send /start.
+You should receive a reply with the control panel keyboard.
+
+### Step 10.4 — Confirm sensors are reading
+
+From the Telegram bot, press the Status button.
+You should see live sensor values.
+
+---
+
+## 11. Running Tests (Optional)
+
+These tests run without hardware attached (everything is mocked):
+
+```bash
+$ cd ~/BeeHiveMonitor
+$ source venv/bin/activate
+$ python -m pytest tests/ -v
+$ deactivate
+```
+
+All tests should show PASSED.
+
+---
+
+## 12. Manual / Debug Run
+
+Use this to debug issues without the service running.
+
+### Step 12.1 — Stop the service first
+
+```bash
+$ sudo systemctl stop beehive.service
+```
+
+### Step 12.2 — Activate venv
+
+```bash
+$ cd ~/BeeHiveMonitor
+$ source venv/bin/activate
+```
+
+### Step 12.3 — Run the bot manually
+
+```bash
+$ python3 bot.py
+```
+
+Press Ctrl + C to stop.
+
+### Step 12.4 — Run the monitor directly (sensor debugging)
+
+```bash
+$ python3 monitor.py 650 "Debug User" 123456789
+```
+
+Replace 650 with your calibration weight in grams, and 123456789 with your actual Telegram user ID.
+
+### Step 12.5 — Re-enable the service when done
+
+```bash
+$ deactivate
+$ sudo systemctl start beehive.service
+```
+
+---
+
+## 13. Useful Day-to-Day Commands
+
+| Task                           | Command                                                                 |
+|--------------------------------|-------------------------------------------------------------------------|
+| Check service status           | sudo systemctl status beehive.service                                   |
+| Start service                  | sudo systemctl start beehive.service                                    |
+| Stop service                   | sudo systemctl stop beehive.service                                     |
+| Restart service                | sudo systemctl restart beehive.service                                  |
+| Watch live service logs        | journalctl -u beehive.service -f                                        |
+| Watch app log file             | tail -f ~/BeeHiveMonitor/logs/beehive.log                              |
+| Activate venv (manual work)    | source ~/BeeHiveMonitor/venv/bin/activate                              |
+| Deactivate venv                | deactivate                                                              |
+| Update Python packages         | source ~/BeeHiveMonitor/venv/bin/activate && pip install -r ~/BeeHiveMonitor/requirements.txt --upgrade && deactivate |
+| Check I2C devices              | sudo i2cdetect -y 1                                                     |
+| Check microphone               | arecord -l                                                              |
+| Check CPU temperature          | vcgencmd measure_temp                                                   |
+| View data CSV                  | cat ~/BeeHiveMonitor/data/hive_update.csv                              |
+| View calibration               | cat ~/BeeHiveMonitor/data/calibration.json                             |
+| Edit secrets override          | sudo nano /etc/systemd/system/beehive.service.d/override.conf          |
+| Reload after editing secrets   | sudo systemctl daemon-reload && sudo systemctl restart beehive.service  |
+| Reboot Pi                      | sudo reboot                                                             |
+
+---
+
+## 14. File Reference
+
+| File / Folder              | Purpose                                                                              |
+|----------------------------|--------------------------------------------------------------------------------------|
+| monitor.py                 | Main sensor loop — reads sensors every 25s, logs CSV, uploads ThingSpeak, alerts     |
+| bot.py                     | Telegram bot — receives commands, launches/stops monitor.py as a child process       |
+| config.py                  | All constants with env-var overrides — never put real secrets here                   |
+| requirements.txt           | Python package list — install inside the venv                                        |
+| install.sh                 | One-shot installer — runs apt, creates venv, installs service                        |
+| enable_i2s.sh              | Adds I2S overlay lines to /boot/firmware/config.txt                                  |
+| services/beehive.service   | systemd unit template (placeholders replaced by install.sh)                          |
+| audio/capture.py           | Records 2s of audio from INMP441 via sounddevice                                     |
+| audio/fft.py               | FFT analysis — extracts dominant frequency in 100-800 Hz bee band                    |
+| audio/filters.py           | Bandpass filter for acoustic signal                                                  |
+| sensors/hx711_sensor.py    | HX711 driver — reads load cell, applies calibration                                  |
+| sensors/dht22_sensor.py    | DHT22 driver — reads temperature and humidity                                        |
+| sensors/mpu6050_sensor.py  | MPU6050 driver — reads accelerometer and gyroscope over I2C                          |
+| sensors/inmp441_sensor.py  | INMP441 driver — delegates to audio/capture.py                                       |
+| tgbot/alerts.py            | Formats and sends threshold-breach alerts to Telegram                                |
+| tgbot/commands.py          | All /start, status, calibration, CSV download handlers                               |
+| tgbot/keyboards.py         | Telegram inline keyboard layouts                                                     |
+| utils/logger.py            | Rotating file and console logger                                                     |
+| utils/csv_logger.py        | Appends sensor readings to data/hive_update.csv                                      |
+| utils/thingspeak.py        | Uploads fields to ThingSpeak channels with rate-limit guard                          |
+| utils/network.py           | Retrying HTTP session with exponential backoff                                       |
+| utils/watchdog.py          | Writes heartbeat file each cycle                                                     |
+| utils/calibration.py       | Loads / saves calibration JSON; guides weighing workflow                              |
+| data/calibration.json      | Saved scale calibration (auto-created, persists across reboots)                      |
+| data/members.json          | Telegram member access list (managed via bot commands)                               |
+| data/hive_update.csv       | Rolling sensor data log                                                              |
+| logs/beehive.log           | Rotating application log (max 5 MB x 5 files)                                       |
+
+---
+
+## 15. Troubleshooting
+
+### arecord -l shows no capture devices
+
+```bash
+# Confirm the overlay lines exist
+$ grep -E "i2s|googlevoicehat" /boot/firmware/config.txt
+
+# If missing, re-run and reboot
+$ sudo bash ~/BeeHiveMonitor/enable_i2s.sh
+$ sudo reboot
+```
+
+### i2cdetect -y 1 shows no device at 0x68
+
+- Check SDA -> GPIO2 and SCL -> GPIO3 are firmly connected.
+- Check MPU6050 VCC is 3.3V (not 5V).
+- Re-enable I2C:
+
+```bash
+$ sudo raspi-config nonint do_i2c 0
+$ sudo reboot
+```
+
+### Service fails to start (status shows failed)
+
+```bash
+# View error details
+$ journalctl -u beehive.service -n 50 --no-pager
+```
+
+Common causes:
+- Wrong bot token — re-check override.conf (section 7.5)
+- Import error — pip install -r requirements.txt not run in venv
+- Port conflict — another instance is running, stop it first
+
+### Bot does not reply in Telegram
+
+1. Check the token in override.conf is correct.
+2. Make sure BEEHIVE_ADMIN_ID matches your actual Telegram user ID.
+3. Tail logs for Unauthorized or Conflict errors:
+
+```bash
+$ journalctl -u beehive.service -f
+```
+
+### pip install -r requirements.txt fails
+
+- Ensure libatlas-base-dev and portaudio19-dev are installed (section 6.1).
+- Ensure venv is activated (prompt shows (venv)).
+- For hx711 errors try: pip install hx711==1.1.2.3
+
+### Permission denied on GPIO / I2C / audio (manual run only)
+
+```bash
+$ sudo usermod -aG gpio,i2c,audio,spi pi
+$ newgrp gpio
+```
+
+### After editing override.conf, changes not picked up
+
+```bash
+$ sudo systemctl daemon-reload
+$ sudo systemctl restart beehive.service
+```
+
+---
+
+## Quick-Start Summary (after initial setup is complete)
+
+```bash
+# 1. SSH in via PuTTY
+
+# 2. Check the service is running
+sudo systemctl status beehive.service
+
+# 3. If not running, start it
+sudo systemctl start beehive.service
+
+# 4. Watch live logs
+journalctl -u beehive.service -f
+```
+
+That is it. The bot handles everything else from Telegram.
+</file>
+
+</files>

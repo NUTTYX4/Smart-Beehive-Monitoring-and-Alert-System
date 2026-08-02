@@ -19,3 +19,7 @@ adafruit-blinka>=8.20.0 ; platform_machine == "armv7l" or platform_machine == "a
 
 # INMP441 I2S microphone capture (native I2S via PortAudio, no ADC/SPI)
 sounddevice>=0.4.6
+
+# AI acoustic inference (optional — needed only when ai_module/ is active)
+# Full training deps are in ai_module/requirements_ai.txt
+librosa>=0.10

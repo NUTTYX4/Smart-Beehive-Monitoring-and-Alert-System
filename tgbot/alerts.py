@@ -80,12 +80,35 @@ class AlertContext:
 
 def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple[List[str], str]:
     """Evaluate every alert rule against the current sensor snapshot and
-    the previous cycle's context. Returns (alerts, behavior_status)."""
+    the previous cycle's context. Returns (alerts, behavior_status).
+
+    When the AI engine is active, ``sensor["behavior"]`` is non-empty
+    and used as the primary status label. When it is empty (FFT-only
+    fallback), ``classify_behavior()`` derives the label from the
+    dominant frequency.
+    """
     alerts: List[str] = []
 
-    status, freq_alert = classify_behavior(dominant_freq)
-    if freq_alert:
-        alerts.append(freq_alert)
+    # ------------------------------------------------------------------
+    # Acoustic behaviour — AI-primary, FFT-fallback
+    # ------------------------------------------------------------------
+    ai_behavior = sensor.get("behavior", "")
+    ai_confidence = sensor.get("confidence", 0.0)
+
+    if ai_behavior:
+        # AI engine provided a classification
+        status = ai_behavior
+        if "Triggered" in ai_behavior:
+            alerts.append(
+                f"⚔️ *DANGER: Hive Distress / Panic State Detected!* "
+                f"(AI Confidence: {ai_confidence:.0%})"
+            )
+    else:
+        # FFT-only fallback
+        status, freq_alert = classify_behavior(dominant_freq)
+        if freq_alert:
+            alerts.append(freq_alert)
+
     if ctx.prev_freq > 0 and abs(dominant_freq - ctx.prev_freq) >= ALERT_FREQ_CHANGE_THRESHOLD:
         alerts.append(f"⚠️ *Sudden Freq Shift:* {ctx.prev_freq:.2f}Hz ➡ {dominant_freq:.2f}Hz")
 

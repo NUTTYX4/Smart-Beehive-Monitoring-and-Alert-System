@@ -467,3 +467,58 @@ async def _apply_calibration_and_start(
         context.user_data[flag] = False
     except Exception as exc:  # noqa: BLE001
         await update.message.reply_text(f"❌ Failed: {exc}")
+
+
+# ----------------------------------------------------------------------
+# /set_ratio — direct scale ratio tuning
+# ----------------------------------------------------------------------
+@member_required
+async def set_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/set_ratio <float_value> — directly update the HX711 scale ratio
+    without running a full calibration cycle. The new ratio is persisted
+    to ``data/calibration.json`` so it survives reboots.
+
+    Restricted to admins and approved members.
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/set_ratio <float_value>`\n"
+            "Example: `/set_ratio 423.567890`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    try:
+        new_ratio = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid number. Provide a float value.")
+        return
+
+    if new_ratio == 0.0:
+        await update.message.reply_text("❌ Ratio cannot be zero.")
+        return
+
+    user = update.effective_user
+    user_name = f"{user.full_name} (@{user.username or user.id})"
+
+    # Load existing calibration to preserve the weight_g field
+    cal = {}
+    try:
+        if CALIBRATION_FILE.exists():
+            with open(CALIBRATION_FILE, "r") as fh:
+                cal = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    weight_g = cal.get("weight_g", 0.0)
+    save_calibration(weight_g, new_ratio, owner_name=user_name, owner_id=user.id)
+
+    await update.message.reply_text(
+        f"✅ *Scale ratio updated*\n\n"
+        f"New ratio: `{new_ratio:.6f}`\n"
+        f"Persisted to `calibration.json`\n\n"
+        f"_Note: The running monitor will pick up the new ratio on next restart._",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    logger.info("Scale ratio set to %.6f by %s", new_ratio, user_name)
+
