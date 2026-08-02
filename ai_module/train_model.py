@@ -55,7 +55,11 @@ def _bandpass(samples: np.ndarray, sr: float) -> np.ndarray:
 def _extract_mfcc(samples: np.ndarray, sr: float) -> np.ndarray:
     import librosa  # type: ignore[import-untyped]
     mfccs = librosa.feature.mfcc(y=samples.astype(np.float32), sr=sr, n_mfcc=N_MFCC)
-    return np.mean(mfccs, axis=1).astype(np.float32)
+    mfcc_mean = np.mean(mfccs, axis=1).astype(np.float32)
+    std = np.std(mfcc_mean)
+    if std > 1e-6:
+        mfcc_mean = (mfcc_mean - np.mean(mfcc_mean)) / std
+    return mfcc_mean.astype(np.float32)
 
 
 def load_and_slice(
@@ -67,9 +71,10 @@ def load_and_slice(
 
     audio, actual_sr = librosa.load(str(wav_path), sr=sr, mono=True)
     chunk_samples = int(chunk_s * actual_sr)
+    stride_samples = int(0.5 * actual_sr)
     results: list[tuple[np.ndarray, int]] = []
 
-    for start in range(0, len(audio) - chunk_samples + 1, chunk_samples):
+    for start in range(0, len(audio) - chunk_samples + 1, stride_samples):
         chunk = audio[start : start + chunk_samples]
         filtered = _bandpass(chunk, actual_sr)
         mfcc_feat = _extract_mfcc(filtered, actual_sr)
@@ -87,7 +92,8 @@ def build_model(input_dim: int = N_MFCC):
     import tensorflow as tf  # type: ignore[import-untyped]
 
     model = tf.keras.Sequential([
-        tf.keras.layers.Dense(32, activation="relu", input_shape=(input_dim,)),
+        tf.keras.layers.Input(shape=(input_dim,)),
+        tf.keras.layers.Dense(32, activation="relu"),
         tf.keras.layers.Dropout(0.2),
         tf.keras.layers.Dense(16, activation="relu"),
         tf.keras.layers.Dense(1, activation="sigmoid"),

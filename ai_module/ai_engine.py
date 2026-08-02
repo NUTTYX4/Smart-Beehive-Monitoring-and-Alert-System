@@ -91,7 +91,11 @@ def extract_mfcc(
 
     audio = samples.astype(np.float32)
     mfccs = librosa.feature.mfcc(y=audio, sr=sample_rate, n_mfcc=n_mfcc)
-    return np.mean(mfccs, axis=1).astype(np.float32)  # (n_mfcc,)
+    mfcc_mean = np.mean(mfccs, axis=1).astype(np.float32)  # (n_mfcc,)
+    std = np.std(mfcc_mean)
+    if std > 1e-6:
+        mfcc_mean = (mfcc_mean - np.mean(mfcc_mean)) / std
+    return mfcc_mean.astype(np.float32)
 
 
 # ======================================================================
