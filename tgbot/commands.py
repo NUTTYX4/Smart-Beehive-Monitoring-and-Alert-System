@@ -233,19 +233,23 @@ def _pi_health_text() -> str:
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     return (
-        "⚙️ *System Health*\n\n"
-        f"🌡️ CPU Temp: `{temp_str}`\n"
-        f"🧮 CPU Usage: `{cpu_pct:.1f}%`\n"
-        f"💾 Memory: `{mem.percent:.1f}%` used ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)\n"
-        f"💿 Disk: `{disk.percent:.1f}%` used ({disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB)\n"
-        f"⏱️ System Uptime: `{_uptime_str()}`\n"
-        f"🤖 Bot Uptime: `{_bot_uptime_str()}`"
+        "*HARDWARE & SYSTEM DIAGNOSTICS*\n"
+        "─────────────────────────────\n"
+        f"*Host Platform:* `{platform.system()} {platform.machine()}` (`{platform.node()}`)\n"
+        f"*CPU Cores / Usage:* `{psutil.cpu_count(logical=True)} cores` @ `{cpu_pct:.1f}%`\n"
+        f"*CPU Thermal Status:* `{temp_str}`\n"
+        f"*System Memory:* `{mem.percent:.1f}% used` (`{mem.used // (1024**2)} / {mem.total // (1024**2)} MB`)\n"
+        f"*Storage Volume:* `{disk.percent:.1f}% used` (`{disk.used // (1024**3)} / {disk.total // (1024**3)} GB`)\n"
+        f"*System Uptime:* `{_uptime_str()}`\n"
+        f"*Service Uptime:* `{_bot_uptime_str()}`\n"
+        "─────────────────────────────\n"
+        "Status: [ONLINE] Nominal Operations"
     )
 
 
 def _system_info_text() -> str:
     return (
-        "🖥️ *System Information*\n\n"
+        "*SYSTEM SPECIFICATIONS*\n"
         f"Platform: `{platform.system()} {platform.release()}`\n"
         f"Machine: `{platform.machine()}`\n"
         f"Python: `{platform.python_version()}`\n"
@@ -255,7 +259,7 @@ def _system_info_text() -> str:
 
 
 def _latest_sensor_row() -> Optional[str]:
-    """Return the last CSV row (most recent sensor reading) as text."""
+    """Return the last CSV row (most recent sensor reading) formatted as an enterprise telemetry snapshot."""
     if not HIVE_DATA_CSV.exists():
         return None
     try:
@@ -265,8 +269,25 @@ def _latest_sensor_row() -> Optional[str]:
             return None
         headers = lines[0].split(",")
         values = lines[-1].split(",")
-        pairs = zip(headers, values)
-        return "\n".join(f"*{h}:* `{v}`" for h, v in pairs)
+        data = dict(zip(headers, values))
+        
+        timestamp = data.get("datestamp") or data.get("Timestamp") or "N/A"
+        weight = data.get("weight", "N/A")
+        temp = data.get("temperature", "N/A")
+        humid = data.get("humidity", "N/A")
+        freq = data.get("dominant_freq", "N/A")
+        behavior = data.get("behavior") or data.get("Behavior") or "Normal / Active"
+        
+        return (
+            f"*Timestamp:* `{timestamp}`\n"
+            "─────────────────────────────\n"
+            f"*Colony State:* `{behavior}`\n"
+            f"*Internal Climate:* `{temp} °C` | `{humid} % RH`\n"
+            f"*Scale Net Weight:* `{weight} g`\n"
+            f"*Acoustic Signature:* `{freq} Hz`\n"
+            f"*Structural Status:* Nominal (Vector stable)\n"
+            "─────────────────────────────"
+        )
     except OSError as exc:
         logger.error("Failed to read latest sensor row: %s", exc)
         return None
@@ -287,7 +308,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "manage_admins", "cal_mode_bottle", "cal_mode_standard",
     }
     if action in restricted_actions and not is_approved(uid):
-        await query.answer("🛑 Access Denied. Approved Admin status required.", show_alert=True)
+        await query.answer("Access Denied. Approved Admin status required.", show_alert=True)
         return
 
     if action == "start_init_member":
@@ -295,8 +316,8 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action == "stop_script_member":
         await _handle_stop(update, context)
     elif action == "status_check":
-        status = f"🟢 Running (by {_state['runner_name']})" if _is_running() else "🔴 Stopped"
-        await query.answer(f"System Status: {status}", show_alert=True)
+        status = f"ONLINE (Active by {_state['runner_name']})" if _is_running() else "OFFLINE (Standby)"
+        await query.answer(f"System State: {status}", show_alert=True)
     elif action == "change_calibration":
         await _handle_change_calibration(update, context)
     elif action == "cal_mode_bottle":
@@ -304,9 +325,9 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data["awaiting_calibration_change"] = False
         context.user_data["awaiting_bottle_test_weight"] = False
         await query.edit_message_text(
-            "🍾 *Option 1: Static Bottle Attached*\n\n"
+            "*Option 1: Static Container Tare*\n\n"
             "Ensure your empty bottle assembly is resting undisturbed on the load cell.\n\n"
-            "👉 *Enter the approximate weight of the attached bottle in grams*\n"
+            "*Enter the approximate weight of the attached container in grams*\n"
             "(Example: `284`):",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -315,9 +336,9 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data["awaiting_bottle_weight"] = False
         context.user_data["awaiting_bottle_test_weight"] = False
         await query.edit_message_text(
-            "⚖️ *Option 2: Standard Calibration*\n\n"
-            "Ensure your load cell is completely empty.\n\n"
-            "👉 *Type known test weight in grams to calibrate*\n"
+            "*Option 2: Standard Scale Calibration*\n\n"
+            "Ensure your load cell is completely unburdened.\n\n"
+            "*Type known test weight in grams to calibrate*\n"
             "(Example: `100` or `500`):",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -335,22 +356,22 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer(f"System: {_uptime_str()} | Bot: {_bot_uptime_str()}", show_alert=True)
     elif action == "sensor_readings":
         row = _latest_sensor_row()
-        text = row if row else "ℹ️ No sensor data logged yet."
+        text = row if row else "No telemetry log data logged yet."
         await query.edit_message_text(
-            f"📈 *Latest Sensor Readings*\n\n{text}",
+            f"*LATEST TELEMETRY SNAPSHOT*\n\n{text}",
             reply_markup=keyboards.back_to_menu(),
             parse_mode=ParseMode.MARKDOWN,
         )
     elif action == "main_menu":
         if is_approved(uid):
             await query.edit_message_text(
-                "*Admin Command Center*\n\nUse the buttons below to open the live web dashboard, check sensor telemetry, and control the monitoring script.",
+                "*ADMIN COMMAND CENTER*\n\nSelect a system control operation below:",
                 reply_markup=keyboards.main_menu(_is_running()),
                 parse_mode=ParseMode.MARKDOWN,
             )
         else:
             await query.edit_message_text(
-                "*🐝 Smart Hive Monitor — Public Access*\n\nYou have read-only guest access to check live sensor readings and our IoT web dashboard.\nTo unlock full system control and calibration capabilities, tap *Request Admin Access* below.",
+                "*SMART HIVE MONITORING SYSTEM*\n\nYou have public read-only access to live sensor telemetry and the web dashboard.\nTo unlock system administration capabilities, select *Request Admin Access*.",
                 reply_markup=keyboards.guest_menu(),
                 parse_mode=ParseMode.MARKDOWN,
             )

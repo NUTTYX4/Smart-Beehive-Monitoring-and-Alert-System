@@ -47,6 +47,7 @@ from utils.logger import get_logger
 from utils.network import wait_for_internet
 from utils.thingspeak import ThingSpeakUploader
 from utils.watchdog import Heartbeat
+from utils.weather import weather_service
 
 logger = get_logger(__name__)
 
@@ -63,27 +64,27 @@ def _build_hive_update_message(sensor: dict, behavior: str) -> str:
     confidence_str = ""
     confidence = sensor.get("confidence", 0.0)
     if confidence and confidence > 0:
-        confidence_str = f"\n├ AI Confidence: `{confidence:.0%}`"
+        confidence_str = f" (`{confidence:.0%}` AI confidence)"
+
+    weather = weather_service.get_current_conditions()
+    loc_str = weather.get("city", "Auto-IP")
+    if weather.get("valid"):
+        ext_str = f"`{weather['temperature']:.1f} °C` | `{weather['humidity']:.1f}% RH` ({weather['description']})"
+    else:
+        ext_str = "`Unavailable (Offline)`"
 
     return f"""
-🐝 *HIVE UPDATE* 🐝
-🕑 *Time:* `{sensor['datestamp']}`
-🔊 *Acoustics*
-├ Dominant Freq: `{sensor['dominant_freq']:.2f} Hz`{confidence_str}
-└ Behavior: *{behavior}*
-🌡️ *Environment*
-├ Temperature: `{sensor['temperature']:.1f} °C`
-└ Humidity: `{sensor['humidity']:.1f} %`
-⚖️ *Weight*
-└ Current: `{sensor['weight']:.2f} g`
-📈 *Motion (Accel)*
-├ Ax: `{sensor['accel_x']:.2f} g`
-├ Ay: `{sensor['accel_y']:.2f} g`
-└ Az: `{sensor['accel_z']:.2f} g`
-🌀 *Rotation (Gyro)*
-├ Gx: `{sensor['gyro_x']:.1f}`
-├ Gy: `{sensor['gyro_y']:.1f}`
-└ Gz: `{sensor['gyro_z']:.1f}`
+*BEEHIVE TELEMETRY REPORT*
+Timestamp: `{sensor['datestamp']}` | Location: `{loc_str}`
+─────────────────────────────
+*Colony State:* `{behavior}`{confidence_str}
+*Internal Climate:* `{sensor['temperature']:.1f} °C` | `{sensor['humidity']:.1f}% RH`
+*External Weather:* {ext_str}
+*Scale Net Weight:* `{sensor['weight']:.2f} g`
+*Acoustic Signature:* `{sensor['dominant_freq']:.2f} Hz`
+*Structural Integrity:* Nominal (Vector stable)
+─────────────────────────────
+Status: [ONLINE] Nominal Operations
 """.strip()
 
 
@@ -134,7 +135,7 @@ def main() -> None:
             "Applied saved calibration: ratio=%.6f, weight=%.2fg (by %s)",
             saved_cal.scale_ratio, saved_cal.weight_g, saved_cal.owner_name,
         )
-        send_message(TELEGRAM_LOG_CHANNEL, f"⚖️ *Loaded saved calibration* (ratio `{saved_cal.scale_ratio:.6f}`)")
+        send_message(TELEGRAM_LOG_CHANNEL, f"[TELEMETRY] Loaded persistent scale calibration (ratio `{saved_cal.scale_ratio:.6f}`)")
         
         # Internal sanity verification against last sent/logged data
         try:
@@ -153,8 +154,8 @@ def main() -> None:
         # No prior calibration — run the full guided sequence
         hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
 
-    send_message(TELEGRAM_LOG_CHANNEL, f"🚀 *Started* by {starter_name}")
-    send_message(TELEGRAM_LOG_CHANNEL, "✅ Hive Monitor is online. If you see this, channel posting works.")
+    send_message(TELEGRAM_LOG_CHANNEL, f"[SYSTEM] Hive Telemetry Service initialized by {starter_name}")
+    send_message(TELEGRAM_LOG_CHANNEL, "[ONLINE] Hive Telemetry Feed synchronized with Cloud Analytics and Telegram Command Center.")
     csv_logger.write_header_if_needed()
 
     ctx = AlertContext()

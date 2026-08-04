@@ -124,9 +124,9 @@ FFT_NOISE_GATE: Final[float] = _env_float("BEEHIVE_FFT_NOISE_GATE", 0.01)
 # -------------------------------------------------------------------
 ALERT_FREQ_CHANGE_THRESHOLD: Final[float] = _env_float("BEEHIVE_ALERT_FREQ_DELTA", 20.0)
 ALERT_TEMP_HIGH: Final[float] = _env_float("BEEHIVE_ALERT_TEMP_HIGH", 36.0)
-ALERT_TEMP_LOW: Final[float] = _env_float("BEEHIVE_ALERT_TEMP_LOW", 30.0)
-ALERT_HUMID_LOW: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_LOW", 40.0)
-ALERT_HUMID_HIGH: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_HIGH", 70.0)
+ALERT_TEMP_LOW: Final[float] = _env_float("BEEHIVE_ALERT_TEMP_LOW", 15.0)
+ALERT_HUMID_LOW: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_LOW", 35.0)
+ALERT_HUMID_HIGH: Final[float] = _env_float("BEEHIVE_ALERT_HUMID_HIGH", 88.0)
 
 WEIGHT_MIN_VALID: Final[float] = _env_float("BEEHIVE_WEIGHT_MIN", -50.0)
 WEIGHT_MAX_VALID: Final[float] = _env_float("BEEHIVE_WEIGHT_MAX", 5000.0)
@@ -134,6 +134,7 @@ WEIGHT_SUDDEN_JUMP: Final[float] = _env_float("BEEHIVE_WEIGHT_JUMP", 300.0)
 
 ACCEL_Z_EXPECTED_G: Final[float] = _env_float("BEEHIVE_ACCEL_Z_EXPECTED", 1.0)
 ACCEL_Z_TOLERANCE: Final[float] = _env_float("BEEHIVE_ACCEL_Z_TOLERANCE", 0.25)
+ACCEL_MAG_TOLERANCE: Final[float] = _env_float("BEEHIVE_ACCEL_MAG_TOLERANCE", 0.30)
 GYRO_ABS_ALERT: Final[float] = _env_float("BEEHIVE_GYRO_ABS_ALERT", 120.0)
 
 MOTION_ACCEL_DELTA: Final[float] = _env_float("BEEHIVE_MOTION_ACCEL_DELTA", 0.20)

@@ -21,6 +21,7 @@ from config import (
     ALERT_HUMID_LOW,
     ALERT_TEMP_HIGH,
     ALERT_TEMP_LOW,
+    ACCEL_MAG_TOLERANCE,
     ACCEL_Z_EXPECTED_G,
     ACCEL_Z_TOLERANCE,
     GYRO_ABS_ALERT,
@@ -33,6 +34,7 @@ from config import (
 )
 from utils.logger import get_logger
 from utils.network import build_http_session
+from utils.weather import weather_service
 
 logger = get_logger(__name__)
 
@@ -45,28 +47,25 @@ _session = build_http_session()
 def classify_behavior(freq: float) -> Tuple[str, Optional[str]]:
     """Return (status_label, alert_text_or_None) for a dominant frequency."""
     if freq > 450:
-        return "⚔️ Aggressive / Swarming", (
-            f"⚔️ *DANGER: Aggression/Swarm Detected!* ({freq:.2f}Hz)\n"
-            "_High pitch indicates bees are defensive or taking flight to swarm._"
+        return "Aggressive / Swarming", (
+            f"[CRITICAL] Aggressive or Swarm Acoustic Profile ({freq:.2f} Hz)\n"
+            "High frequency energy indicates defensive activity or imminent swarming."
         )
     if 330 <= freq <= 450:
-        return "👑 Queen Piping", (
-            f"👑 *ALERT: Queen Piping Detected!* ({freq:.2f}Hz)\n"
-            "_Virgin queen is signaling; a swarm may leave the hive soon._"
+        return "Queen Piping", (
+            f"[WARNING] Queen Piping Acoustic Signature ({freq:.2f} Hz)\n"
+            "Virgin queen signaling detected; colony state change likely."
         )
     if 190 <= freq < 330:
-        return "🟢 Normal / Active", None
+        return "Normal / Active", None
     if 100 <= freq < 190:
-        return "🆘 Queenless Roar", (
-            f"🆘 *WARNING: Queenless Roar!* ({freq:.2f}Hz)\n"
-            "_Low, chaotic moaning sound indicates distress or a missing queen._"
+        return "Queenless Roar", (
+            f"[WARNING] Queenless Roar Signature ({freq:.2f} Hz)\n"
+            "Low frequency harmonic resonance indicates colony distress or queenlessness."
         )
     if 0 < freq < 100:
-        return "💤 Dormant / Low", (
-            f"💤 *NOTICE: Low Activity* ({freq:.2f}Hz)\n"
-            "_Hive is dormant/sleeping, or the sensor path is obstructed._"
-        )
-    return "⚪ Unknown / Silence", None
+        return "Dormant / Low Activity", None
+    return "Unknown / Standby", None
 
 
 @dataclass
@@ -80,14 +79,7 @@ class AlertContext:
 
 
 def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple[List[str], str]:
-    """Evaluate every alert rule against the current sensor snapshot and
-    the previous cycle's context. Returns (alerts, behavior_status).
-
-    When the AI engine is active, ``sensor["behavior"]`` is non-empty
-    and used as the primary status label. When it is empty (FFT-only
-    fallback), ``classify_behavior()`` derives the label from the
-    dominant frequency.
-    """
+    """Evaluate alert criteria against sensor readings and adaptive outdoor weather."""
     alerts: List[str] = []
 
     # ------------------------------------------------------------------
@@ -97,63 +89,63 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
     ai_confidence = sensor.get("confidence", 0.0)
 
     if ai_behavior:
-        # AI engine provided a classification
         status = ai_behavior
         if "Triggered" in ai_behavior:
             alerts.append(
-                f"⚔️ *DANGER: Hive Distress / Panic State Detected!* "
-                f"(AI Confidence: {ai_confidence:.0%})"
+                f"[CRITICAL] Colony Distress State Triggered (AI Confidence: {ai_confidence:.0%})"
             )
     else:
-        # FFT-only fallback
         status, freq_alert = classify_behavior(dominant_freq)
         if freq_alert:
             alerts.append(freq_alert)
 
     if ctx.prev_freq > 0 and abs(dominant_freq - ctx.prev_freq) >= ALERT_FREQ_CHANGE_THRESHOLD:
-        alerts.append(f"⚠️ *Sudden Freq Shift:* {ctx.prev_freq:.2f}Hz ➡ {dominant_freq:.2f}Hz")
+        alerts.append(f"[NOTICE] Frequency Shift: {ctx.prev_freq:.2f} Hz -> {dominant_freq:.2f} Hz")
+
+    # Fetch real-time ambient weather to apply dynamic thermodynamic tolerances
+    ambient = weather_service.get_current_conditions()
+    limits = weather_service.get_adaptive_thresholds(ambient)
 
     t, h = sensor["temperature"], sensor["humidity"]
-    if t > ALERT_TEMP_HIGH:
-        alerts.append(f"🔥 *Too Hot:* {t:.1f}°C")
-    elif t < ALERT_TEMP_LOW:
-        alerts.append(f"🥶 *Too Cold:* {t:.1f}°C")
-    if h < ALERT_HUMID_LOW:
-        alerts.append(f"🌵 *Too Dry:* {h:.1f}%")
-    elif h > ALERT_HUMID_HIGH:
-        alerts.append(f"💧 *Too Humid:* {h:.1f}%")
+    if t > limits["temp_high"]:
+        alerts.append(f"[ALERT] Internal Temp High: {t:.1f}°C (Max Allowed: {limits['temp_high']}°C)")
+    elif t < limits["temp_low"]:
+        alerts.append(f"[ALERT] Internal Temp Low: {t:.1f}°C (Min Allowed: {limits['temp_low']}°C)")
+    if h < limits["humid_low"]:
+        alerts.append(f"[ALERT] Internal Humidity Low: {h:.1f}% RH (Min Allowed: {limits['humid_low']}%)")
+    elif h > limits["humid_high"]:
+        alerts.append(f"[ALERT] Internal Humidity High: {h:.1f}% RH (Max Allowed: {limits['humid_high']}%)")
 
     w = sensor["weight"]
-    if w < 0:
-        alerts.append(f"⚖️ *Negative Weight:* {w:.2f} g")
+    if w < -2.0:  # Allow minimal settling jitter around 0g tare
+        alerts.append(f"[ALERT] Negative Weight Reading: {w:.2f} g")
     if w > WEIGHT_MAX_VALID:
-        alerts.append(f"⚖️ *Over Capacity:* {w:.2f} g")
+        alerts.append(f"[CRITICAL] Scale Over Capacity: {w:.2f} g (Max: {WEIGHT_MAX_VALID} g)")
     if ctx.prev_weight is not None and abs(w - ctx.prev_weight) >= WEIGHT_SUDDEN_JUMP:
         delta = w - ctx.prev_weight
-        direction = "increase" if delta > 0 else "decrease"
-        alerts.append(f"⚖️ *Sudden weight {direction}:* {ctx.prev_weight:.2f} g → {w:.2f} g (Δ {delta:+.2f} g)")
-
-    if abs(sensor["accel_z"] - ACCEL_Z_EXPECTED_G) > ACCEL_Z_TOLERANCE:
-        alerts.append(f"📈 *Tilt/Movement:* AccZ={sensor['accel_z']:.2f}g")
-    if any(abs(g) > GYRO_ABS_ALERT for g in (sensor["gyro_x"], sensor["gyro_y"], sensor["gyro_z"])):
-        alerts.append(
-            f"🌀 *High Rotation:* Gx={sensor['gyro_x']:.1f}, Gy={sensor['gyro_y']:.1f}, Gz={sensor['gyro_z']:.1f}"
-        )
+        direction = "Gain" if delta > 0 else "Loss"
+        alerts.append(f"[ALERT] Rapid Weight {direction}: {ctx.prev_weight:.2f} g -> {w:.2f} g (Δ {delta:+.2f} g)")
 
     ax, ay, az = sensor["accel_x"], sensor["accel_y"], sensor["accel_z"]
     accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
     gx, gy, gz = sensor["gyro_x"], sensor["gyro_y"], sensor["gyro_z"]
     gyro_mag = (gx**2 + gy**2 + gz**2) ** 0.5
 
+    # Use total vector magnitude rather than rigid Z-axis check to prevent false orientation alarms
+    if abs(accel_mag - 1.0) > ACCEL_MAG_TOLERANCE:
+        alerts.append(f"[WARNING] Structural Shock or Tilt Detected: |a|={accel_mag:.2f}g")
+    if any(abs(g) > GYRO_ABS_ALERT for g in (gx, gy, gz)):
+        alerts.append(f"[WARNING] High Angular Velocity: Gx={gx:.1f}, Gy={gy:.1f}, Gz={gz:.1f} dps")
+
     if ctx.prev_accel_mag is not None and abs(accel_mag - ctx.prev_accel_mag) >= MOTION_ACCEL_DELTA:
         d = accel_mag - ctx.prev_accel_mag
-        direction = "increase" if d > 0 else "decrease"
-        alerts.append(f"📳 *Sudden acceleration {direction}:* |a| {ctx.prev_accel_mag:.2f}g → {accel_mag:.2f}g (Δ {d:+.2f}g)")
+        direction = "spike" if d > 0 else "drop"
+        alerts.append(f"[NOTICE] Acceleration {direction}: {ctx.prev_accel_mag:.2f}g -> {accel_mag:.2f}g (Δ {d:+.2f}g)")
 
     if ctx.prev_gyro_mag is not None and abs(gyro_mag - ctx.prev_gyro_mag) >= MOTION_GYRO_DELTA:
         d = gyro_mag - ctx.prev_gyro_mag
-        direction = "increase" if d > 0 else "decrease"
-        alerts.append(f"🌀 *Sudden rotation {direction}:* |ω| {ctx.prev_gyro_mag:.1f} → {gyro_mag:.1f} (Δ {d:+.1f})")
+        direction = "spike" if d > 0 else "drop"
+        alerts.append(f"[NOTICE] Rotational rate {direction}: {ctx.prev_gyro_mag:.1f} -> {gyro_mag:.1f} dps (Δ {d:+.1f})")
 
     ctx.prev_freq = dominant_freq
     ctx.prev_weight = w
