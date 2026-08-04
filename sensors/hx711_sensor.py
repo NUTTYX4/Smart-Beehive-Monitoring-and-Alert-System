@@ -30,8 +30,10 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 try:
+    import RPi.GPIO as GPIO
     from hx711 import HX711
 except ImportError:  # pragma: no cover - hardware library absent on dev machines
+    GPIO = None  # type: ignore[assignment]
     HX711 = None  # type: ignore[assignment,misc]
 
 
@@ -47,8 +49,9 @@ class HX711Sensor:
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._hx = None
-        if HX711 is not None:
+        if HX711 is not None and GPIO is not None:
             try:
+                GPIO.setmode(GPIO.BCM)
                 self._hx = HX711(dout_pin=dout_pin, pd_sck_pin=sck_pin)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to initialize HX711: %s", exc)

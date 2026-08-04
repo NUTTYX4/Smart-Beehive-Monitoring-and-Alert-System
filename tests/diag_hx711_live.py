@@ -48,13 +48,15 @@ except ImportError as exc:
     print(f"❌ Failed to import project config or utils: {exc}")
     sys.exit(1)
 
-# Try importing hardware HX711 library; fall back to mock if off-Pi
+# Try importing hardware HX711 library and GPIO; fall back to mock if off-Pi
 try:
+    import RPi.GPIO as GPIO
     from hx711 import HX711
     HARDWARE_AVAILABLE = True
 except ImportError:
     HARDWARE_AVAILABLE = False
-    print("⚠️ [WARNING] 'hx711' hardware library not installed. Running in Mock Simulation Mode.")
+    GPIO = None  # type: ignore
+    print("⚠️ [WARNING] 'hx711' or RPi.GPIO hardware library not installed. Running in Mock Simulation Mode.")
 
     class HX711:  # type: ignore
         """Mock HX711 stand-in for off-Pi testing and debugging."""
@@ -277,22 +279,13 @@ def mode_live_calibrated_feed(hx: HX711) -> None:
 def main() -> None:
     """Main terminal menu loop."""
     print(f"⚡ Initializing HX711 Sensor on DOUT={HX711_DOUT_PIN}, SCK={HX711_SCK_PIN}...")
-    hx = HX711(dout_pin=HX711_DOUT_PIN, pd_sck_pin=HX711_SCK_PIN)
-    
-    while True:
-        clear_screen()
-        print("=" * 66)
-        print("  🐝 SMART BEEHIVE MONITOR: HX711 DIAGNOSTIC & CALIBRATION SUITE")
-        print("=" * 66)
-        print(f" Hardware Status: {'🟢 DETECTED (Raspberry Pi)' if HARDWARE_AVAILABLE else '🟡 MOCK SIMULATION MODE (Off-Pi)'}")
-        print(f" Configured Pins: DOUT = GPIO {HX711_DOUT_PIN}, SCK = GPIO {HX711_SCK_PIN}")
-        print("-" * 66)
-        print("  [1] 📡 Live Raw Signal Monitor (Check Jumper Wires & Noise Before Calibration)")
-        print("  [2] ⚖️ Guided Precision Calibration (Handle ~284g Attached Bottle & Save Ratio)")
-        print("  [3] 🌊 Live Calibrated Weight Feed (Test Water Pouring & Linearity After Calibration)")
-        print("  [4] 🚪 Exit Diagnostic Tool")
-        print("-" * 66)
-
+    if HARDWARE_AVAILABLE and GPIO is not None:
+        try:
+            GPIO.setmode(GPIO.BCM)
+            print("   [GPIO] Pin numbering set to BCM mode.")
+        except Exception as exc:
+            print(f"⚠️ [WARNING] Could not set GPIO mode to BCM: {exc}")
+.
         choice = input("👉 Select an option [1-4]: ").strip()
         if choice == "1":
             mode_live_raw_signal(hx)
