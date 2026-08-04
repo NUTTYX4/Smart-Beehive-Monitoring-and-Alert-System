@@ -285,7 +285,22 @@ def main() -> None:
             print("   [GPIO] Pin numbering set to BCM mode.")
         except Exception as exc:
             print(f"⚠️ [WARNING] Could not set GPIO mode to BCM: {exc}")
-.
+    hx = HX711(dout_pin=HX711_DOUT_PIN, pd_sck_pin=HX711_SCK_PIN)
+    
+    while True:
+        clear_screen()
+        print("=" * 66)
+        print("  🐝 SMART BEEHIVE MONITOR: HX711 DIAGNOSTIC & CALIBRATION SUITE")
+        print("=" * 66)
+        print(f" Hardware Status: {'🟢 DETECTED (Raspberry Pi)' if HARDWARE_AVAILABLE else '🟡 MOCK SIMULATION MODE (Off-Pi)'}")
+        print(f" Configured Pins: DOUT = GPIO {HX711_DOUT_PIN}, SCK = GPIO {HX711_SCK_PIN}")
+        print("-" * 66)
+        print("  [1] 📡 Live Raw Signal Monitor (Check Jumper Wires & Noise Before Calibration)")
+        print("  [2] ⚖️ Guided Precision Calibration (Handle ~284g Attached Bottle & Save Ratio)")
+        print("  [3] 🌊 Live Calibrated Weight Feed (Test Water Pouring & Linearity After Calibration)")
+        print("  [4] 🚪 Exit Diagnostic Tool")
+        print("-" * 66)
+
         choice = input("👉 Select an option [1-4]: ").strip()
         if choice == "1":
             mode_live_raw_signal(hx)
