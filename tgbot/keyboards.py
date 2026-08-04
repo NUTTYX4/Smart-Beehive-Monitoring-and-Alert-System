@@ -67,3 +67,13 @@ def admin_approval_keyboard(user_id: int, user_name: str) -> InlineKeyboardMarku
 
 def back_to_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="main_menu")]])
+
+
+def calibration_mode_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for choosing between static bottle tare or standard calibration."""
+    keyboard = [
+        [InlineKeyboardButton("🍾 Option 1: Static Bottle Attached (~284g)", callback_data="cal_mode_bottle")],
+        [InlineKeyboardButton("⚖️ Option 2: No (Standard Calibration)", callback_data="cal_mode_standard")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(keyboard)

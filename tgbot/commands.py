@@ -42,7 +42,7 @@ from config import (
     TELEGRAM_PUBLIC_CHANNEL_LINK,
 )
 from tgbot import keyboards
-from utils.calibration import save_calibration
+from utils.calibration import load_calibration, save_calibration
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -284,7 +284,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     restricted_actions = {
         "start_init_member", "stop_script_member", "change_calibration",
         "check_pi_health", "system_info", "uptime_info", "download_data_csv",
-        "manage_admins",
+        "manage_admins", "cal_mode_bottle", "cal_mode_standard",
     }
     if action in restricted_actions and not is_approved(uid):
         await query.answer("🛑 Access Denied. Approved Admin status required.", show_alert=True)
@@ -299,6 +299,28 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer(f"System Status: {status}", show_alert=True)
     elif action == "change_calibration":
         await _handle_change_calibration(update, context)
+    elif action == "cal_mode_bottle":
+        context.user_data["awaiting_bottle_weight"] = True
+        context.user_data["awaiting_calibration_change"] = False
+        context.user_data["awaiting_bottle_test_weight"] = False
+        await query.edit_message_text(
+            "🍾 *Option 1: Static Bottle Attached*\n\n"
+            "Ensure your empty bottle assembly is resting undisturbed on the load cell.\n\n"
+            "👉 *Enter the approximate weight of the attached bottle in grams*\n"
+            "(Example: `284`):",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "cal_mode_standard":
+        context.user_data["awaiting_calibration_change"] = True
+        context.user_data["awaiting_bottle_weight"] = False
+        context.user_data["awaiting_bottle_test_weight"] = False
+        await query.edit_message_text(
+            "⚖️ *Option 2: Standard Calibration*\n\n"
+            "Ensure your load cell is completely empty.\n\n"
+            "👉 *Type known test weight in grams to calibrate*\n"
+            "(Example: `100` or `500`):",
+            parse_mode=ParseMode.MARKDOWN,
+        )
     elif action == "download_data_csv":
         await _handle_download_csv(update, context)
     elif action == "check_pi_health":
@@ -488,9 +510,16 @@ async def _handle_change_calibration(update: Update, context: ContextTypes.DEFAU
             return
         _stop_monitor()
 
-    context.user_data["awaiting_calibration_change"] = True
+    context.user_data["awaiting_calibration_change"] = False
+    context.user_data["awaiting_bottle_weight"] = False
+    context.user_data["awaiting_bottle_test_weight"] = False
     await query.edit_message_text(
-        "⚖️ *Change Calibration*\n\nType new known weight (g).\nExample: `650`", parse_mode=ParseMode.MARKDOWN
+        "⚖️ *Scale Calibration & Tare Mode*\n\n"
+        "Select your current load cell physical setup:\n\n"
+        "• *Option 1:* Static container (like an attached `~284g` bottle) is resting on the scale.\n"
+        "• *Option 2:* Standard empty scale calibration.",
+        reply_markup=keyboards.calibration_mode_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
@@ -543,6 +572,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if context.user_data.get("awaiting_bottle_weight"):
+        try:
+            b_weight = float(text)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid number. Please enter a numerical weight in grams.")
+            return
+        context.user_data["bottle_tare_g"] = b_weight
+        context.user_data["awaiting_bottle_weight"] = False
+        context.user_data["awaiting_bottle_test_weight"] = True
+        await update.message.reply_text(
+            f"✅ *Attached Bottle Tared (`{b_weight:.1f}g`)*\n\n"
+            "The scale baseline is set to treat this attached container as `0.00 g`.\n\n"
+            "Now, add a known test weight or pour water into the bottle.\n"
+            "👉 *Type the added test weight in grams* (Example: `140` or `200`):",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if context.user_data.get("awaiting_bottle_test_weight"):
+        user_name = f"{user.full_name} (@{user.username or user.id})"
+        await _apply_calibration_and_start(
+            update, context, text,
+            user_name=user_name,
+            user_id=str(user.id),
+            flag="awaiting_bottle_test_weight",
+            success_msg="🎉 *Bottle Calibrated Successfully!* Monitor RUNNING with test weight `{w}`g.",
+        )
+        return
+
 
 async def _apply_calibration_and_start(
     update: Update,
@@ -561,7 +619,9 @@ async def _apply_calibration_and_start(
 
     try:
         owner_id = int(user_id) if str(user_id).isdigit() else update.effective_user.id
-        save_calibration(weight, 1.0, owner_name=user_name, owner_id=owner_id)
+        existing_cal = load_calibration()
+        ratio = existing_cal.scale_ratio if (existing_cal.scale_ratio != 1.0 and existing_cal.scale_ratio != 0.0) else 1.0
+        save_calibration(weight, ratio, owner_name=user_name, owner_id=owner_id)
         _launch_monitor(weight, user_name, user_id)
         await update.message.reply_text(success_msg.format(w=text), parse_mode=ParseMode.MARKDOWN)
         context.user_data[flag] = False
