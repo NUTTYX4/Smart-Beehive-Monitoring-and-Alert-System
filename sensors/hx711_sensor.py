@@ -130,9 +130,9 @@ class HX711Sensor:
         """
         if self._hx is None:
             logger.error("Cannot calibrate: HX711 hardware not initialized")
-            cal = CalibrationData(weight_g=target_weight_g, scale_ratio=1.0,
+            cal = CalibrationData(weight_g=target_weight_g, scale_ratio=1.0, offset=0.0,
                                    owner_name=owner_name, owner_id=owner_id)
-            save_calibration(cal.weight_g, cal.scale_ratio, owner_name, owner_id)
+            save_calibration(cal.weight_g, cal.scale_ratio, owner_name, owner_id, offset=0.0)
             return cal
 
         self._hx.reset()
@@ -171,7 +171,8 @@ class HX711Sensor:
             time.sleep(0.2)
             test_weight = self.read_weight_robust(samples=15)
 
-        save_calibration(target_weight_g, ratio, owner_name, owner_id)
+        offset = float(self._hx.get_offset()) if hasattr(self._hx, "get_offset") else 0.0
+        save_calibration(target_weight_g, ratio, owner_name, owner_id, offset=offset)
 
         badge = "✅ SUCCESS" if abs(test_weight - target) <= 0.05 * target else "⚠️ CHECK"
         self._notify(
@@ -179,7 +180,7 @@ class HX711Sensor:
             f"Check Weight: {test_weight:.2f} g (target {target:.2f} g)"
         )
         return CalibrationData(
-            weight_g=target_weight_g, scale_ratio=ratio, owner_name=owner_name, owner_id=owner_id
+            weight_g=target_weight_g, scale_ratio=ratio, offset=offset, owner_name=owner_name, owner_id=owner_id
         )
 
     def apply_saved_calibration(self) -> CalibrationData:
@@ -189,6 +190,42 @@ class HX711Sensor:
         if self._hx is not None:
             try:
                 self._hx.set_scale_ratio(cal.scale_ratio)
+                if hasattr(self._hx, "set_offset"):
+                    self._hx.set_offset(cal.offset)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to apply saved calibration ratio: %s", exc)
+                logger.warning("Failed to apply saved calibration ratio/offset: %s", exc)
+        return cal
+
+    def perform_tare(
+        self,
+        owner_name: str = "System",
+        owner_id: Optional[int] = None,
+    ) -> CalibrationData:
+        """Zero the scale hardware and persist the new raw offset while preserving existing scale ratio."""
+        cal = load_calibration()
+        owner_name = owner_name or cal.owner_name
+        owner_id = owner_id if owner_id is not None else cal.owner_id
+
+        if self._hx is None:
+            logger.error("Cannot perform tare: HX711 hardware not initialized")
+            save_calibration(cal.weight_g, cal.scale_ratio, owner_name, owner_id, offset=0.0)
+            cal.offset = 0.0
+            cal.owner_name = owner_name
+            cal.owner_id = owner_id
+            return cal
+
+        try:
+            self._hx.zero()
+            time.sleep(0.5)
+            offset = float(self._hx.get_offset()) if hasattr(self._hx, "get_offset") else 0.0
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to execute zero/tare on HX711: %s", exc)
+            offset = 0.0
+
+        save_calibration(cal.weight_g, cal.scale_ratio, owner_name, owner_id, offset=offset)
+        logger.info("Persistent tare saved: offset=%.2f, ratio=%.6f by %s", offset, cal.scale_ratio, owner_name)
+
+        cal.offset = offset
+        cal.owner_name = owner_name
+        cal.owner_id = owner_id
         return cal

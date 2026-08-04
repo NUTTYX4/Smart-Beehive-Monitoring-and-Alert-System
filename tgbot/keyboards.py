@@ -19,7 +19,10 @@ def main_menu(is_running: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🌐 Open Live Web Dashboard", url=TELEGRAM_WEB_DASHBOARD)],
         [InlineKeyboardButton(f"{status_icon} Start Hive Monitor", callback_data="start_init_member")],
         [InlineKeyboardButton("🛑 Stop Monitor", callback_data="stop_script_member")],
-        [InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration")],
+        [
+            InlineKeyboardButton("⚖️ Change Calibration", callback_data="change_calibration"),
+            InlineKeyboardButton("⚖️ Tare (Zero) Hive", callback_data="tare_hive"),
+        ],
         [
             InlineKeyboardButton("📄 Check Status", callback_data="status_check"),
             InlineKeyboardButton("🔗 Join Channel", url=TELEGRAM_PUBLIC_CHANNEL_LINK),

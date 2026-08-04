@@ -42,7 +42,8 @@ from config import (
     TELEGRAM_PUBLIC_CHANNEL_LINK,
 )
 from tgbot import keyboards
-from utils.calibration import save_calibration
+from utils.calibration import load_calibration, save_calibration
+from sensors.hx711_sensor import HX711Sensor
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -282,7 +283,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     uid = query.from_user.id
 
     restricted_actions = {
-        "start_init_member", "stop_script_member", "change_calibration",
+        "start_init_member", "stop_script_member", "change_calibration", "tare_hive",
         "check_pi_health", "system_info", "uptime_info", "download_data_csv",
         "manage_admins",
     }
@@ -299,6 +300,8 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer(f"System Status: {status}", show_alert=True)
     elif action == "change_calibration":
         await _handle_change_calibration(update, context)
+    elif action == "tare_hive":
+        await _handle_tare(update, context)
     elif action == "download_data_csv":
         await _handle_download_csv(update, context)
     elif action == "check_pi_health":
@@ -494,6 +497,44 @@ async def _handle_change_calibration(update: Update, context: ContextTypes.DEFAU
     )
 
 
+async def _handle_tare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    uid = query.from_user.id
+    if not is_approved(uid):
+        await query.answer("🛑 Access Denied.", show_alert=True)
+        return
+
+    if _is_running():
+        await query.answer(
+            "🛑 Cannot tare while the monitor is running! Please stop the script first.",
+            show_alert=True,
+        )
+        return
+
+    user = query.from_user
+    user_name = f"{user.full_name} (@{user.username or user.id})"
+
+    await query.edit_message_text("⚖️ *Taring scale...* Please keep the hive/scale steady.", parse_mode=ParseMode.MARKDOWN)
+
+    sensor = HX711Sensor()
+    try:
+        cal_data = sensor.perform_tare(owner_name=user_name, owner_id=uid)
+        await query.edit_message_text(
+            f"✅ *Tare Complete & Baseline Saved!*\n\n"
+            f"Hardware offset (`{cal_data.offset:.2f}`) persisted to `calibration.json`.\n"
+            f"Scale will remember this empty baseline across restarts.",
+            reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to perform tare: %s", exc)
+        await query.edit_message_text(
+            f"❌ *Tare Failed:* `{exc}`",
+            reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
 async def _handle_download_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not HIVE_DATA_CSV.exists():
@@ -561,7 +602,8 @@ async def _apply_calibration_and_start(
 
     try:
         owner_id = int(user_id) if str(user_id).isdigit() else update.effective_user.id
-        save_calibration(weight, 1.0, owner_name=user_name, owner_id=owner_id)
+        cal = load_calibration()
+        save_calibration(weight, 1.0, owner_name=user_name, owner_id=owner_id, offset=cal.offset)
         _launch_monitor(weight, user_name, user_id)
         await update.message.reply_text(success_msg.format(w=text), parse_mode=ParseMode.MARKDOWN)
         context.user_data[flag] = False
@@ -601,17 +643,9 @@ async def set_ratio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_name = f"{user.full_name} (@{user.username or user.id})"
 
-    # Load existing calibration to preserve the weight_g field
-    cal = {}
-    try:
-        if CALIBRATION_FILE.exists():
-            with open(CALIBRATION_FILE, "r") as fh:
-                cal = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    weight_g = cal.get("weight_g", 0.0)
-    save_calibration(weight_g, new_ratio, owner_name=user_name, owner_id=user.id)
+    # Load existing calibration to preserve the weight_g and offset fields
+    cal = load_calibration()
+    save_calibration(cal.weight_g, new_ratio, owner_name=user_name, owner_id=user.id, offset=cal.offset)
 
     await update.message.reply_text(
         f"✅ *Scale ratio updated*\n\n"
