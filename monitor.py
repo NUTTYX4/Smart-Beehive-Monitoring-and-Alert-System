@@ -135,6 +135,20 @@ def main() -> None:
             saved_cal.scale_ratio, saved_cal.weight_g, saved_cal.owner_name,
         )
         send_message(TELEGRAM_LOG_CHANNEL, f"⚖️ *Loaded saved calibration* (ratio `{saved_cal.scale_ratio:.6f}`)")
+        
+        # Internal sanity verification against last sent/logged data
+        try:
+            last_logged_weight = csv_logger.get_last_logged_weight()
+            if last_logged_weight is not None:
+                startup_weight = hx711.read_weight_robust(samples=7)
+                diff = abs(startup_weight - last_logged_weight)
+                logger.info("🔍 [Internal Verification] Startup live weight: %.2fg | Last logged state: %.2fg (Diff: %.2fg)", startup_weight, last_logged_weight, diff)
+                if diff <= 50.0:
+                    logger.info("✅ Startup weight aligns cleanly with pre-reboot state!")
+                else:
+                    logger.warning("⚠️ Startup weight differs significantly from last logged state by %.2fg", diff)
+        except Exception as exc:
+            logger.debug("Internal startup weight check skipped: %s", exc)
     else:
         # No prior calibration — run the full guided sequence
         hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)

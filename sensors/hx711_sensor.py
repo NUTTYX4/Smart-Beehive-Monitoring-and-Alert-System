@@ -174,7 +174,7 @@ class HX711Sensor:
             time.sleep(0.2)
             test_weight = self.read_weight_robust(samples=15)
 
-        save_calibration(target_weight_g, ratio, owner_name, owner_id)
+        save_calibration(target_weight_g, ratio, owner_name, owner_id, zero_offset=baseline_med)
 
         badge = "✅ SUCCESS" if abs(test_weight - target) <= 0.05 * target else "⚠️ CHECK"
         self._notify(
@@ -182,16 +182,22 @@ class HX711Sensor:
             f"Check Weight: {test_weight:.2f} g (target {target:.2f} g)"
         )
         return CalibrationData(
-            weight_g=target_weight_g, scale_ratio=ratio, owner_name=owner_name, owner_id=owner_id
+            weight_g=target_weight_g, scale_ratio=ratio, zero_offset=baseline_med, owner_name=owner_name, owner_id=owner_id
         )
 
     def apply_saved_calibration(self) -> CalibrationData:
         """Load and apply calibration persisted from a previous run
-        (used to recover automatically after a reboot)."""
+        (used to recover automatically after a reboot without wiping active weight/tare)."""
         cal = load_calibration()
         if self._hx is not None:
             try:
                 self._hx.set_scale_ratio(cal.scale_ratio)
+                if getattr(cal, "zero_offset", 0.0) != 0.0:
+                    if hasattr(self._hx, "set_offset"):
+                        self._hx.set_offset(cal.zero_offset)
+                    else:
+                        self._hx.OFFSET = cal.zero_offset
+                    logger.info("Applied saved tare zero offset: %.2f (preserving absolute weight across reboot)", cal.zero_offset)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to apply saved calibration ratio: %s", exc)
+                logger.warning("Failed to apply saved calibration ratio/offset: %s", exc)
         return cal

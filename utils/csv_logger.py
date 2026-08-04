@@ -11,7 +11,7 @@ import csv
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from config import HIVE_DATA_CSV
 from utils.logger import get_logger
@@ -75,6 +75,23 @@ class CsvLogger:
                     csv.writer(fh).writerow(row)
             except OSError as exc:
                 logger.error("Failed to append CSV row: %s", exc)
+
+    def get_last_logged_weight(self) -> Optional[float]:
+        """Read the last logged weight from CSV for internal startup verification."""
+        with _lock:
+            if not self.path.exists() or self.path.stat().st_size == 0:
+                return None
+            try:
+                with open(self.path, "r", newline="") as fh:
+                    lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+                    if len(lines) <= 1:
+                        return None
+                    last_row = lines[-1].split(",")
+                    if len(last_row) > 3:
+                        return float(last_row[3].strip())
+            except Exception as exc:
+                logger.debug("Could not read last logged weight: %s", exc)
+        return None
 
     def exists(self) -> bool:
         return self.path.exists() and self.path.stat().st_size > 0

@@ -215,13 +215,17 @@ def mode_guided_calibration(hx: HX711) -> None:
     print(f"📊 Delta Count: {raw_delta:.2f}")
     print(f"🎯 Calculated Scale Ratio: {computed_ratio:.6f}")
 
-    save_ans = input("\n💾 Do you want to save this ratio to 'data/calibration.json'? [y/N]: ").strip().lower()
+    save_ans = input("\n💾 Do you want to save this ratio and tare offset to 'data/calibration.json'? [y/N]: ").strip().lower()
     if save_ans == "y":
         try:
             hx.set_scale_ratio(computed_ratio)
-            save_calibration(known_weight, computed_ratio, owner_name="DiagnosticCLI")
-            print(f"\n✨ SUCCESS! Ratio {computed_ratio:.6f} saved to {CALIBRATION_FILE}.")
-            print("The Telegram bot and monitoring service will now use this calibration!")
+            if hasattr(hx, "set_offset"):
+                hx.set_offset(base_med)
+            else:
+                hx.OFFSET = base_med
+            save_calibration(known_weight, computed_ratio, owner_name="DiagnosticCLI", zero_offset=base_med)
+            print(f"\n✨ SUCCESS! Ratio {computed_ratio:.6f} and Offset {base_med:.2f} saved to {CALIBRATION_FILE}.")
+            print("The Telegram bot and monitoring service will now use this exact calibration and tare baseline!")
         except Exception as exc:
             print(f"❌ Failed to save calibration: {exc}")
     else:
@@ -237,21 +241,27 @@ def mode_live_calibrated_feed(hx: HX711) -> None:
     print(" 🌊 MODE 3: LIVE CALIBRATED WEIGHT FEED (POST-CALIBRATION)")
     print("=" * 66)
     
-    # Load latest ratio from disk
+    # Load latest ratio and offset from disk
     cal_data = load_calibration()
     ratio = getattr(cal_data, "scale_ratio", 1.0)
+    stored_offset = getattr(cal_data, "zero_offset", 0.0)
     if ratio != 0:
         hx.set_scale_ratio(ratio)
     
     print(f"Loaded Scale Ratio: {ratio:.6f}")
+    print(f"Loaded Stored Zero Offset: {stored_offset:.2f}")
     print("Pour water or place test items to verify smooth, linear gram readings.")
     print("Press [Ctrl+C] to stop live feed.")
     print("-" * 66)
     
-    # Perform quick baseline lock before starting feed
-    print("⏳ Auto-zeroing current baseline before launching feed...")
-    base_raw, _ = read_clean_sample(hx, n_samples=15, raw=True)
-    print("✅ Zeroed! Launching stream...\n")
+    # Use stored zero offset if present to prevent re-zeroing attached containers/water on startup!
+    if stored_offset != 0.0:
+        base_raw = stored_offset
+        print("✅ Using saved absolute tare offset (no auto-zeroing!). Launching stream...\n")
+    else:
+        print("⏳ No stored offset found. Auto-zeroing current baseline before launching feed...")
+        base_raw, _ = read_clean_sample(hx, n_samples=15, raw=True)
+        print("✅ Zeroed! Launching stream...\n")
     time.sleep(0.5)
 
     try:
