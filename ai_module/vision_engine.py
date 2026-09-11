@@ -53,20 +53,44 @@ class VarroaVisionEngine:
         if not self.available or self._model is None:
             return result_payload
         
-        cap = None
+        frame = None
+        
+        # 1. Try native Raspberry Pi 5 libcamera stack (rpicam-jpeg or libcamera-jpeg)
+        import subprocess
+        import numpy as np
+        
+        for cmd in ["rpicam-jpeg", "libcamera-jpeg"]:
+            try:
+                # -t 100: wait 100ms for exposure to settle
+                # -o -: output to stdout
+                # --nopreview: don't show preview window
+                res = subprocess.run([cmd, "-t", "100", "-o", "-", "--nopreview", "--width", "1920", "--height", "1080"], 
+                                     capture_output=True, check=False)
+                if res.returncode == 0 and len(res.stdout) > 1024:
+                    image_array = np.frombuffer(res.stdout, dtype=np.uint8)
+                    frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+                    break
+            except FileNotFoundError:
+                continue
+                
+        # 2. Fallback to OpenCV V4L2 if libcamera commands failed or not found
+        if frame is None:
+            cap = None
+            try:
+                cap = cv2.VideoCapture(0)
+                if cap.isOpened():
+                    ret, frame_cap = cap.read()
+                    if ret:
+                        frame = frame_cap
+            finally:
+                if cap is not None:
+                    cap.release()
+
+        if frame is None:
+            logger.error("Failed to capture frame from any camera backend.")
+            return result_payload
+            
         try:
-            # Briefly open the camera
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                logger.error("Failed to open camera for mite detection.")
-                return result_payload
-            
-            # Read a single frame
-            ret, frame = cap.read()
-            if not ret:
-                logger.error("Failed to grab frame from camera.")
-                return result_payload
-            
             # Run inference
             results = self._model.predict(source=frame, conf=conf, verbose=False)
             
@@ -79,10 +103,6 @@ class VarroaVisionEngine:
             result_payload["available"] = True
             
         except Exception as e:
-            logger.error("Error during mite detection: %s", e)
-        finally:
-            # Immediately release camera
-            if cap is not None:
-                cap.release()
+            logger.error("Error during mite detection inference: %s", e)
                 
         return result_payload
