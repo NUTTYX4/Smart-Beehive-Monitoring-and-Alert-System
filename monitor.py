@@ -34,12 +34,15 @@ from config import (
     MONITOR_CYCLE_SECONDS,
     MONITOR_IDLE_SLEEP,
     TELEGRAM_LOG_CHANNEL,
+    MITE_THRESHOLD,
     validate_secrets,
 )
 from sensors.dht22_sensor import Dht22Sensor
 from sensors.hx711_sensor import HX711Sensor
 from sensors.inmp441_sensor import Inmp441Sensor
 from sensors.mpu6050_sensor import Mpu6050Sensor
+from sensors.relay_actuator import RelayActuator
+from ai_module.vision_engine import VarroaVisionEngine
 from tgbot.alerts import AlertContext, build_alerts, send_data_and_alerts, send_message
 from utils.calibration import load_calibration
 from utils.csv_logger import CsvLogger
@@ -83,6 +86,7 @@ Timestamp: `{sensor['datestamp']}` | Location: `{loc_str}`
 *Scale Net Weight:* `{sensor['weight']:.2f} g`
 *Acoustic Signature:* `{sensor['dominant_freq']:.2f} Hz`
 *Structural Integrity:* Nominal (Vector stable)
+*📷 Computer Vision:* `Mite Count: {sensor.get('mite_count', 0)}`
 ─────────────────────────────
 Status: [ONLINE] Nominal Operations
 """.strip()
@@ -114,6 +118,8 @@ def main() -> None:
     mpu6050 = Mpu6050Sensor()
     dht22 = Dht22Sensor()
     inmp441 = Inmp441Sensor()
+    relay_actuator = RelayActuator()
+    vision_engine = VarroaVisionEngine()
 
     csv_logger = CsvLogger()
     thingspeak = ThingSpeakUploader()
@@ -167,7 +173,7 @@ def main() -> None:
             now = time.time()
             if now - last_cycle >= MONITOR_CYCLE_SECONDS:
                 try:
-                    _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx)
+                    _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, csv_logger, thingspeak, ctx)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Unhandled error during monitor cycle: %s\n%s", exc, traceback.format_exc())
                     # Never crash: log, alert, and continue on the next cycle.
@@ -183,13 +189,20 @@ def main() -> None:
         send_message(TELEGRAM_LOG_CHANNEL, "🛑 *Stopped*")
 
 
-def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: AlertContext) -> None:
+def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, csv_logger, thingspeak, ctx: AlertContext) -> None:
     from datetime import datetime
 
     weight = hx711.read_weight_robust()
     climate = dht22.read_median()
     imu = mpu6050.read()
     acoustic = inmp441.read()
+    
+    vision_result = vision_engine.detect_mites()
+    mite_count = vision_result.get("mite_count", 0)
+    
+    vaporizer_active = False
+    if mite_count >= MITE_THRESHOLD:
+        vaporizer_active = relay_actuator.trigger_treatment()
 
     sensor = {
         "datestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -202,6 +215,8 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, csv_logger, thingspeak, ctx: Aler
         # AI fields (empty when running in FFT-only mode)
         "behavior": acoustic.behavior,
         "confidence": acoustic.confidence,
+        "mite_count": mite_count,
+        "vaporizer_active": vaporizer_active,
     }
 
     if not acoustic.available:

@@ -190,6 +190,14 @@ AI_MFCC_COEFFICIENTS: Final[int] = _env_int("BEEHIVE_AI_N_MFCC", 40)
 
 
 # -------------------------------------------------------------------
+# Oxalic Acid Vaporizer (YOLO Mite Detection)
+# -------------------------------------------------------------------
+VAPORIZER_RELAY_PIN: Final[int] = _env_int("BEEHIVE_VAPORIZER_PIN", 17)
+MITE_THRESHOLD: Final[int] = _env_int("BEEHIVE_MITE_THRESHOLD", 15)
+TREATMENT_DURATION_S: Final[float] = _env_float("BEEHIVE_TREATMENT_DURATION", 10.0)
+COOLDOWN_S: Final[float] = _env_float("BEEHIVE_COOLDOWN_S", 300.0)
+
+# -------------------------------------------------------------------
 # Startup validation
 # -------------------------------------------------------------------
 def validate_secrets() -> list:

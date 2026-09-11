@@ -27,6 +27,7 @@ from config import (
     GYRO_ABS_ALERT,
     MOTION_ACCEL_DELTA,
     MOTION_GYRO_DELTA,
+    MITE_THRESHOLD,
     TELEGRAM_API_BASE,
     TELEGRAM_BOT_TOKEN,
     WEIGHT_MAX_VALID,
@@ -146,6 +147,13 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
         d = gyro_mag - ctx.prev_gyro_mag
         direction = "spike" if d > 0 else "drop"
         alerts.append(f"[NOTICE] Rotational rate {direction}: {ctx.prev_gyro_mag:.1f} -> {gyro_mag:.1f} dps (Δ {d:+.1f})")
+
+    mite_count = sensor.get("mite_count", 0)
+    if mite_count >= MITE_THRESHOLD:
+        alerts.append(f"[CRITICAL] ⚔️ DANGER: Varroa Mite Infestation Limit Exceeded! ({mite_count} detected)")
+        
+    if sensor.get("vaporizer_active", False):
+        alerts.append("[NOTICE] 💨 Treatment Active: Oxalic Acid Vaporizer Triggered")
 
     ctx.prev_freq = dominant_freq
     ctx.prev_weight = w
