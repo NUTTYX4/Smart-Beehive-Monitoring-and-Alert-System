@@ -24,3 +24,8 @@ sounddevice>=0.4.6
 librosa>=0.10
 tflite-runtime>=2.14 ; platform_machine == "armv7l" or platform_machine == "aarch64"
 tensorflow>=2.15 ; platform_machine == "x86_64" or platform_machine == "AMD64"
+
+# YOLOv8 Vision module & Actuators
+ultralytics>=8.1
+opencv-python-headless>=4.8
+gpiozero>=2.0
