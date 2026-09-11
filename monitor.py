@@ -64,6 +64,11 @@ def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
 
 
 def _build_hive_update_message(sensor: dict, behavior: str) -> str:
+    confidence_str = ""
+    confidence = sensor.get("confidence", 0.0)
+    if confidence and confidence > 0:
+        confidence_str = f" (`{confidence:.0%}` AI confidence)"
+
     weather = weather_service.get_current_conditions()
     loc_str = weather.get("city", "Auto-IP")
     if weather.get("valid"):
@@ -75,7 +80,7 @@ def _build_hive_update_message(sensor: dict, behavior: str) -> str:
 *BEEHIVE TELEMETRY REPORT*
 Timestamp: `{sensor['datestamp']}` | Location: `{loc_str}`
 ─────────────────────────────
-*Colony State:* `{behavior}`
+*Colony State:* `{behavior}`{confidence_str}
 *Internal Climate:* `{sensor['temperature']:.1f} °C` | `{sensor['humidity']:.1f}% RH`
 *External Weather:* {ext_str}
 *Scale Net Weight:* `{sensor['weight']:.2f} g`
