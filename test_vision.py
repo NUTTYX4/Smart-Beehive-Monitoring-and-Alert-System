@@ -9,6 +9,7 @@ the live mite count to the console.
 """
 
 import time
+import sys
 from ai_module.vision_engine import VarroaVisionEngine
 
 def main():
@@ -17,6 +18,20 @@ def main():
     
     if not engine.available:
         print("Engine unavailable. Ensure OpenCV, Ultralytics, and the model file exist.")
+        return
+        
+    if len(sys.argv) > 1:
+        image_path = sys.argv[1]
+        print(f"Testing static image: {image_path}")
+        t0 = time.time()
+        result = engine.detect_mites_from_image(image_path, conf=0.25)
+        t1 = time.time()
+        
+        if result.get("available"):
+            count = result.get("mite_count", 0)
+            print(f"✅ Mites detected: {count} (took {t1 - t0:.2f}s)")
+        else:
+            print("❌ Inference failed.")
         return
         
     print("Starting continuous headless inference. Press Ctrl+C to stop.")

@@ -106,3 +106,33 @@ class VarroaVisionEngine:
             logger.error("Error during mite detection inference: %s", e)
                 
         return result_payload
+
+    def detect_mites_from_image(self, image_path: str, conf: float = 0.25) -> dict:
+        """
+        Runs inference on a static image file.
+        Returns a dict: {"mite_count": int, "available": bool}
+        """
+        result_payload = {"mite_count": 0, "available": False}
+        
+        if not self.available or self._model is None:
+            return result_payload
+            
+        try:
+            frame = cv2.imread(image_path)
+            if frame is None:
+                logger.error("Could not read image file: %s", image_path)
+                return result_payload
+                
+            results = self._model.predict(source=frame, conf=conf, verbose=False)
+            
+            count = 0
+            if results and len(results) > 0:
+                count = len(results[0].boxes)
+                
+            result_payload["mite_count"] = count
+            result_payload["available"] = True
+            
+        except Exception as e:
+            logger.error("Error during static image inference: %s", e)
+            
+        return result_payload
