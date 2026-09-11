@@ -27,7 +27,7 @@ _lock = threading.Lock()
 class CalibrationData:
     weight_g: float = DEFAULT_CALIBRATION_WEIGHT_G
     scale_ratio: float = 1.0
-    zero_offset: float = 0.0
+    offset: float = 0.0
     owner_id: Optional[int] = None
     owner_name: str = "System"
     timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -47,7 +47,7 @@ def load_calibration(path: Path = CALIBRATION_FILE) -> CalibrationData:
             return CalibrationData(
                 weight_g=float(raw.get("weight_g", DEFAULT_CALIBRATION_WEIGHT_G)),
                 scale_ratio=float(raw.get("scale_ratio", 1.0)),
-                zero_offset=float(raw.get("zero_offset", 0.0)),
+                offset=float(raw.get("offset", raw.get("zero_offset", 0.0))),
                 owner_id=raw.get("owner_id") or raw.get("starter_id"),
                 owner_name=raw.get("owner_name") or raw.get("starter_name", "System"),
                 timestamp=raw.get("timestamp", ""),
@@ -62,23 +62,25 @@ def save_calibration(
     scale_ratio: float,
     owner_name: str = "System",
     owner_id: Optional[int] = None,
+    offset: Optional[float] = None,
     path: Path = CALIBRATION_FILE,
     zero_offset: Optional[float] = None,
 ) -> None:
     """Persist calibration data to disk."""
-    if zero_offset is None and path.exists():
+    if offset is None and zero_offset is None and path.exists():
         try:
             with open(path, "r") as fh:
-                zero_offset = float(json.load(fh).get("zero_offset", 0.0))
+                data = json.load(fh)
+                offset = float(data.get("offset", data.get("zero_offset", 0.0)))
         except Exception:
-            zero_offset = 0.0
-    elif zero_offset is None:
-        zero_offset = 0.0
+            offset = 0.0
+    elif offset is None:
+        offset = float(zero_offset) if zero_offset is not None else 0.0
 
     data = CalibrationData(
         weight_g=float(weight_g),
         scale_ratio=float(scale_ratio),
-        zero_offset=float(zero_offset),
+        offset=float(offset),
         owner_id=owner_id,
         owner_name=owner_name,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

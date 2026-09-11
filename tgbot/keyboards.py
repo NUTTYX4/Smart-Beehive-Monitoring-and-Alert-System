@@ -23,7 +23,10 @@ def main_menu(is_running: bool) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Sensor Telemetry", callback_data="sensor_readings"),
+        ],
+        [
             InlineKeyboardButton("Calibrate Scale", callback_data="change_calibration"),
+            InlineKeyboardButton("Tare (Zero) Hive", callback_data="tare_hive"),
         ],
         [
             InlineKeyboardButton("Hardware Diagnostics", callback_data="check_pi_health"),
