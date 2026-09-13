@@ -18,7 +18,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
-            self.wfile.write(b\"\"\"
+            self.wfile.write(b"""
             <html>
             <body style="background:#0f172a; color:white; text-align:center; font-family:sans-serif;">
                 <h2>🐝 Live Dataset Framing</h2>
@@ -26,7 +26,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 <img src="/stream.mjpg" style="border:3px solid #f59e0b; border-radius:8px; max-width:90vw;">
             </body>
             </html>
-            \"\"\")
+            """)
         elif self.path == '/stream.mjpg':
             self.send_response(200)
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
@@ -99,3 +99,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
