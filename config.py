@@ -184,7 +184,7 @@ PYTHON_EXECUTABLE: Final[str] = _env("BEEHIVE_PYTHON", "python3")
 # -------------------------------------------------------------------
 # AI module
 # -------------------------------------------------------------------
-AI_MODEL_PATH: Final[Path] = BASE_DIR / "ai_module" / "bee_acoustic_model.tflite"
+AI_MODEL_PATH: Final[Path] = BASE_DIR / "ai_module" / "audio_model" / "bee_acoustic_model.tflite"
 AI_CONFIDENCE_THRESHOLD: Final[float] = _env_float("BEEHIVE_AI_THRESHOLD", 0.65)
 AI_MFCC_COEFFICIENTS: Final[int] = _env_int("BEEHIVE_AI_N_MFCC", 40)
 

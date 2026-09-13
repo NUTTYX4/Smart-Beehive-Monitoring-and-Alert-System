@@ -42,7 +42,7 @@ from sensors.hx711_sensor import HX711Sensor
 from sensors.inmp441_sensor import Inmp441Sensor
 from sensors.mpu6050_sensor import Mpu6050Sensor
 from sensors.relay_actuator import RelayActuator
-from ai_module.vision_engine import VarroaVisionEngine
+from ai_module.camera_model.vision_engine import VarroaVisionEngine
 from tgbot.alerts import AlertContext, build_alerts, send_data_and_alerts, send_message
 from utils.calibration import load_calibration
 from utils.csv_logger import CsvLogger

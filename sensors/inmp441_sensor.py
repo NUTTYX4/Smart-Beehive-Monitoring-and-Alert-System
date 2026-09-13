@@ -32,7 +32,7 @@ _ai_engine_instance = None  # type: ignore[assignment]
 _ai_import_failed = False
 
 try:
-    from ai_module.ai_engine import AIAcousticEngine
+    from ai_module.audio_model.audio_engine import AIAcousticEngine
 
     _ai_engine_instance = AIAcousticEngine()
     if not _ai_engine_instance.available:

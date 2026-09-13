@@ -10,11 +10,11 @@ the live mite count to the console.
 
 import time
 import sys
-from ai_module.vision_engine import VarroaVisionEngine
+from ai_module.camera_model.vision_engine import VarroaVisionEngine
 
 def main():
     print("Initializing Varroa Vision Engine...")
-    engine = VarroaVisionEngine(model_path="ai_module/varroa_nano.pt")
+    engine = VarroaVisionEngine(model_path="ai_module/camera_model/varroa_nano.pt")
     
     if not engine.available:
         print("Engine unavailable. Ensure OpenCV, Ultralytics, and the model file exist.")
