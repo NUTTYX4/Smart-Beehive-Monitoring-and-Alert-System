@@ -52,8 +52,8 @@ def start_server():
 def update_camera():
     global latest_frame
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
     while True:
         ret, frame = cap.read()
@@ -99,5 +99,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
