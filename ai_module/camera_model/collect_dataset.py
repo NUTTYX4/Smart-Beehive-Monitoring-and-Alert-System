@@ -15,13 +15,15 @@ cmd_base = "rpicam-vid"
 if subprocess.run(["which", "rpicam-vid"], capture_output=True).returncode != 0:
     cmd_base = "libcamera-vid"
 
+# We use 1920x1080 because the IMX219 driver on Pi 5 often times out on 640x480 crops.
+# We will just resize it to 640x480 in OpenCV!
 cmd = [
     cmd_base,
     "-t", "0",
     "--codec", "mjpeg",
-    "--width", "640",
-    "--height", "480",
-    "--framerate", "30",
+    "--width", "1920",
+    "--height", "1080",
+    "--framerate", "15",
     "--nopreview",
     "-o", "-"
 ]
@@ -55,6 +57,9 @@ try:
             frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
             
             if frame is not None:
+                # Resize the 1080p frame down to 640x480 for our dataset
+                frame = cv2.resize(frame, (640, 480))
+                
                 cv2.imshow("🐝 Live Mite Dataset Collector", frame)
                 
                 key = cv2.waitKey(1) & 0xFF
