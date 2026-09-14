@@ -1,132 +1,149 @@
-﻿import cv2
-import os
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ai_module/camera_model/collect_dataset.py
+==========================================
+Varroa Mite Dataset Collector -- Raspberry Pi 5 Edition
+Uses Picamera2 (the official Pi 5 library) to stream a
+live preview, then captures full-resolution frames on demand.
+
+Folder structure created automatically:
+    ai_module/camera_model/vision_dataset/
+        raw/        <- full-res captured frames saved here
+
+Controls (click the live preview window first):
+    SPACE  -- capture and save current frame
+    q/ESC  -- quit safely
+
+Usage:
+    python3 ai_module/camera_model/collect_dataset.py
+"""
+
 import sys
-import subprocess
+import time
 from pathlib import Path
-import shutil
 
-SAVE_DIR = Path(__file__).parent / 'dataset' / 'images'
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
+import cv2
+import numpy as np
 
-def check_camera():
-    print("⏳ Checking camera hardware...")
+# ---------------------------------------------------------------------------
+# Directory layout
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent / "vision_dataset"
+RAW_DIR  = BASE_DIR / "raw"
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+PREVIEW_RES  = (640, 480)
+CAPTURE_RES  = (1920, 1080)
+WINDOW_TITLE = "BeeHive | Varroa Mite Dataset Collector  [SPACE=save  Q=quit]"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def count_existing() -> int:
+    return len(list(RAW_DIR.glob("mite_*.jpg")))
+
+
+def overlay_hud(frame: np.ndarray, count: int) -> np.ndarray:
+    """Burn a minimal HUD onto the preview frame."""
+    h, w = frame.shape[:2]
+    bar = frame.copy()
+    cv2.rectangle(bar, (0, h - 45), (w, h), (0, 0, 0), -1)
+    frame = cv2.addWeighted(bar, 0.55, frame, 0.45, 0)
+    cv2.putText(frame,
+                f"Saved: {count}  |  SPACE = capture    Q = quit",
+                (12, h - 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 120), 1,
+                cv2.LINE_AA)
+    return frame
+
+
+def flash_saved(frame: np.ndarray, name: str) -> np.ndarray:
+    """Flash a green SAVED banner on a copy of the frame."""
+    out = frame.copy()
+    cv2.putText(out, f"SAVED  {name}", (12, 40),
+                cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 255, 80), 2, cv2.LINE_AA)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Main -- Picamera2 (official Pi 5 library)
+# ---------------------------------------------------------------------------
+def run_picamera2() -> None:
     try:
-        # Fire a test shot with a 5-second timeout in case the hardware is deadlocked
-        res = subprocess.run(
-            ["rpicam-jpeg", "-o", "/dev/null", "-t", "10", "--width", "640", "--height", "480", "--nopreview"],
-            capture_output=True,
-            timeout=5
-        )
-        if res.returncode != 0:
-            print("❌ ERROR: Camera is not available or is locked by another process!")
-            print("Error details:", res.stderr.decode('utf-8').strip())
-            print("\nTroubleshooting:")
-            print("1. Run 'sudo reboot' to unlock the camera hardware.")
-            print("2. Check your ribbon cable connection.")
-            sys.exit(1)
-        print("✅ Camera is available and connected!")
-    except subprocess.TimeoutExpired:
-        print("❌ CRITICAL ERROR: The camera hardware is completely deadlocked!")
-        print("This happens when a previous script crashes and leaves the camera running in the background.")
-        print("\n👉 Please run 'sudo reboot' to reset your Raspberry Pi's hardware!")
+        from picamera2 import Picamera2
+    except ImportError:
+        print("ERROR: Picamera2 is not installed.")
+        print("Install it with:  sudo apt install python3-picamera2")
         sys.exit(1)
 
-def collect_data():
-    check_camera()
-    
-    img_count = len(list(SAVE_DIR.glob('*.jpg')))
-    print(f"\n✅ Ready! Found {img_count} existing images.")
-    print("=========================================")
-    print("🎮 DATASET COLLECTION CONTROLS:")
-    print("  [SPACEBAR] : Capture a high-res snapshot")
-    print("  [y]        : Confirm and save snapshot")
-    print("  [n]        : Cancel and discard snapshot")
-    print("  [q] or ESC : Quit safely")
-    print("  (Or press Ctrl+C in this terminal)")
-    print("=========================================")
-    print("Opening live feed...")
-    
-    window_name = "🐝 Live Mite Dataset Collector"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    
-    while True:
-        preview_file = SAVE_DIR / "preview.jpg"
-        
-        # Grab preview frame
-        cmd = ["rpicam-jpeg", "-o", str(preview_file), "-t", "200", "--width", "1024", "--height", "768", "--nopreview"]
-        subprocess.run(cmd, capture_output=True)
-        
-        if not preview_file.exists():
-            continue
-            
-        frame = cv2.imread(str(preview_file))
-        if frame is None:
-            continue
-            
-        frame = cv2.resize(frame, (640, 480))
-        
-        # Add UI text to live feed
-        cv2.putText(frame, "LIVE FEED - Press SPACE to capture", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.imshow(window_name, frame)
-        
-        # Wait 1ms for keypress
-        key = cv2.waitKey(1) & 0xFF
-        
-        if key == 27 or key == ord('q'): # ESC or q
-            print("\n🛑 Exiting safely...")
-            break
-            
-        elif key == 32: # SPACEBAR
-            print("\n📸 Snapshot requested! Capturing high-res frame...")
-            
-            # Capture a high-quality frame
-            capture_file = SAVE_DIR / "capture.jpg"
-            cmd_hq = ["rpicam-jpeg", "-o", str(capture_file), "-t", "500", "--width", "1920", "--height", "1080", "--nopreview"]
-            subprocess.run(cmd_hq, capture_output=True)
-            
-            if capture_file.exists():
-                cap_frame = cv2.imread(str(capture_file))
-                if cap_frame is not None:
-                    disp_frame = cv2.resize(cap_frame, (640, 480))
-                    
-                    # Add confirmation text
-                    cv2.putText(disp_frame, "CAPTURED! Press 'y' to save, 'n' to discard.", (10, 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-                    cv2.imshow(window_name, disp_frame)
-                    
-                    print("❓ Press 'y' (Save) or 'n' (Discard) in the camera window...")
-                    
-                    # Wait infinitely for y or n
-                    while True:
-                        confirm_key = cv2.waitKey(0) & 0xFF
-                        if confirm_key == ord('y'):
-                            final_file = SAVE_DIR / f"mite_frame_{img_count:03d}.jpg"
-                            shutil.copy(str(capture_file), str(final_file))
-                            print(f"✅ SAVED: {final_file.name}")
-                            img_count += 1
-                            if img_count % 15 == 0:
-                                print("\n🔄 ACTION: Please rearrange the seeds to add variety!\n")
-                            break
-                        elif confirm_key == ord('n'):
-                            print("❌ Discarded. Returning to live feed...")
-                            break
-                        elif confirm_key == 27 or confirm_key == ord('q'):
-                            print("\n🛑 Exiting safely...")
-                            if preview_file.exists(): preview_file.unlink()
-                            if capture_file.exists(): capture_file.unlink()
-                            cv2.destroyAllWindows()
-                            sys.exit(0)
-                            
-                capture_file.unlink()
-                
-        if preview_file.exists():
-            preview_file.unlink()
+    print("Initialising Picamera2 ...")
+    cam = Picamera2()
 
-if __name__ == "__main__":
+    # Dual-stream config: lores for live preview, main for full-res captures
+    preview_cfg = cam.create_video_configuration(
+        main={"size": CAPTURE_RES, "format": "RGB888"},
+        lores={"size": PREVIEW_RES, "format": "YUV420"},
+        display="lores"
+    )
+    cam.configure(preview_cfg)
+    cam.start()
+    time.sleep(1)  # let auto-exposure settle
+
+    count = count_existing()
+    print(f"Camera live. Dataset already contains {count} images.")
+    print(f"Saving to: {RAW_DIR.resolve()}")
+    print("Controls  -- SPACE: capture | Q / ESC: quit")
+
+    cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW_TITLE, *PREVIEW_RES)
+
     try:
-        collect_data()
-    except KeyboardInterrupt:
-        print("\n🛑 Exited via Ctrl+C safely.")
+        while True:
+            # Grab the low-res YUV preview buffer (fast, no disk I/O)
+            yuv = cam.capture_array("lores")
+            bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV420p2BGR)
+            bgr = cv2.resize(bgr, PREVIEW_RES)
+
+            display = overlay_hud(bgr, count)
+            cv2.imshow(WINDOW_TITLE, display)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key in (ord('q'), 27):  # Q or ESC
+                print("Quitting...")
+                break
+
+            if key == 32:  # SPACE -- capture
+                # Pull a full-res RGB frame from the main stream
+                full_rgb = cam.capture_array("main")
+                full_bgr = cv2.cvtColor(full_rgb, cv2.COLOR_RGB2BGR)
+
+                ts   = int(time.time() * 1000)
+                name = f"mite_{ts}.jpg"
+                path = RAW_DIR / name
+                cv2.imwrite(str(path), full_bgr,
+                            [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+                count += 1
+                print(f"  [{count:>4}]  Saved  {name}")
+
+                # Flash confirmation on screen for 400 ms
+                cv2.imshow(WINDOW_TITLE, flash_saved(display, name))
+                cv2.waitKey(400)
+
+                if count % 15 == 0:
+                    print("\n  *** Rearrange the mites/seeds for more variety! ***\n")
+
     finally:
+        cam.stop()
+        cam.close()
         cv2.destroyAllWindows()
+        print(f"\nDone. {count} images saved to {RAW_DIR.resolve()}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    run_picamera2()

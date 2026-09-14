@@ -1,0 +1,6 @@
+﻿# Ignore all captured dataset images (sync separately via push_dataset.sh)
+raw/*.jpg
+raw/*.png
+raw/*.jpeg
+# Keep folder tracked
+!raw/.gitkeep
