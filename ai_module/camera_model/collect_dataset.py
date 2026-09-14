@@ -10,19 +10,26 @@ SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 def check_camera():
     print("⏳ Checking camera hardware...")
-    # Fire a 10ms test shot to ensure the camera is responsive
-    res = subprocess.run(
-        ["rpicam-jpeg", "-o", "/dev/null", "-t", "10", "--width", "640", "--height", "480", "--nopreview"],
-        capture_output=True
-    )
-    if res.returncode != 0:
-        print("❌ ERROR: Camera is not available or is locked by another process!")
-        print("Error details:", res.stderr.decode('utf-8').strip())
-        print("\nTroubleshooting:")
-        print("1. Run 'sudo reboot' to unlock the camera hardware.")
-        print("2. Check your ribbon cable connection.")
+    try:
+        # Fire a test shot with a 5-second timeout in case the hardware is deadlocked
+        res = subprocess.run(
+            ["rpicam-jpeg", "-o", "/dev/null", "-t", "10", "--width", "640", "--height", "480", "--nopreview"],
+            capture_output=True,
+            timeout=5
+        )
+        if res.returncode != 0:
+            print("❌ ERROR: Camera is not available or is locked by another process!")
+            print("Error details:", res.stderr.decode('utf-8').strip())
+            print("\nTroubleshooting:")
+            print("1. Run 'sudo reboot' to unlock the camera hardware.")
+            print("2. Check your ribbon cable connection.")
+            sys.exit(1)
+        print("✅ Camera is available and connected!")
+    except subprocess.TimeoutExpired:
+        print("❌ CRITICAL ERROR: The camera hardware is completely deadlocked!")
+        print("This happens when a previous script crashes and leaves the camera running in the background.")
+        print("\n👉 Please run 'sudo reboot' to reset your Raspberry Pi's hardware!")
         sys.exit(1)
-    print("✅ Camera is available and connected!")
 
 def collect_data():
     check_camera()
@@ -45,7 +52,7 @@ def collect_data():
     while True:
         preview_file = SAVE_DIR / "preview.jpg"
         
-        # 1. Grab a preview frame (Hardware reset mode, very stable)
+        # Grab preview frame
         cmd = ["rpicam-jpeg", "-o", str(preview_file), "-t", "200", "--width", "1024", "--height", "768", "--nopreview"]
         subprocess.run(cmd, capture_output=True)
         
