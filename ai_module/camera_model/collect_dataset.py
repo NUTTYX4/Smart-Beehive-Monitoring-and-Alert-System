@@ -19,19 +19,23 @@ print("- Press 'ESC' or 'q' to close the window.")
 while True:
     output_file = SAVE_DIR / "temp.jpg"
     
-    # We use -t 400 to give the camera 400ms to adjust brightness/exposure
-    # Running a fresh hardware capture every frame bypasses all continuous stream bugs!
     cmd = ["rpicam-jpeg", "-o", str(output_file), "-t", "400", "--width", "1920", "--height", "1080", "--nopreview"]
-    subprocess.run(cmd, capture_output=True)
+    res = subprocess.run(cmd, capture_output=True)
+    
+    if res.returncode != 0:
+        print("❌ ERROR: Camera capture failed! The camera is likely busy or locked.")
+        print(res.stderr.decode('utf-8'))
+        break
     
     if output_file.exists():
         frame = cv2.imread(str(output_file))
         if frame is not None:
-            # Resize for optimal UI scaling and YOLO processing
             frame = cv2.resize(frame, (640, 480))
             cv2.imshow("🐝 Live Mite Dataset Collector", frame)
+        else:
+            print("⚠️ Captured an empty or invalid image frame.")
     
-    key = cv2.waitKey(1) & 0xFF
+    key = cv2.waitKey(10) & 0xFF
     if key == 32: # Spacebar
         final_file = SAVE_DIR / f"mite_frame_{img_count:03d}.jpg"
         if output_file.exists():
