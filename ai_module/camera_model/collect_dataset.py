@@ -2,35 +2,64 @@
 import os
 import sys
 import subprocess
-import numpy as np
 from pathlib import Path
 
 SAVE_DIR = Path(__file__).parent / 'dataset' / 'images'
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
-print("Starting native Pi 5 camera stream (bypassing VideoCapture)...")
+# ---------------------------------------------------------
+# FALLBACK: If Picamera2 is missing, use a subprocess loop
+# ---------------------------------------------------------
+def run_fallback():
+    print("⚠️ Using subprocess fallback (1-2 FPS).")
+    img_count = len(list(SAVE_DIR.glob('*.jpg')))
+    while True:
+        output_file = SAVE_DIR / "temp.jpg"
+        # We know rpicam-jpeg works from your test_camera.py script!
+        cmd = ["rpicam-jpeg", "-o", str(output_file), "-t", "10", "--width", "1920", "--height", "1080", "--nopreview"]
+        subprocess.run(cmd, capture_output=True)
+        if output_file.exists():
+            frame = cv2.imread(str(output_file))
+            if frame is not None:
+                frame = cv2.resize(frame, (640, 480))
+                cv2.imshow("🐝 Live Mite Dataset Collector (Fallback)", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 32:
+            final_file = SAVE_DIR / f"mite_frame_{img_count:03d}.jpg"
+            import shutil
+            shutil.copy(str(output_file), str(final_file))
+            print(f"✅ Saved: {final_file.name}")
+            img_count += 1
+        elif key == 27 or key == ord('q'):
+            break
+    if output_file.exists():
+        output_file.unlink()
+    cv2.destroyAllWindows()
 
-# Detect whether to use rpicam-vid or libcamera-vid
-cmd_base = "rpicam-vid"
-if subprocess.run(["which", "rpicam-vid"], capture_output=True).returncode != 0:
-    cmd_base = "libcamera-vid"
+# ---------------------------------------------------------
+# MAIN: Use Picamera2 for native Raspberry Pi 5 support
+# ---------------------------------------------------------
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    print("❌ Picamera2 not found.")
+    run_fallback()
+    sys.exit(0)
 
-# We use 1920x1080 because the IMX219 driver on Pi 5 often times out on 640x480 crops.
-# We will just resize it to 640x480 in OpenCV!
-cmd = [
-    cmd_base,
-    "-t", "0",
-    "--codec", "mjpeg",
-    "--width", "1920",
-    "--height", "1080",
-    "--framerate", "15",
-    "--nopreview",
-    "-o", "-"
-]
+print("✅ Initializing native Picamera2 stream for Raspberry Pi 5...")
 
-process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr)
+try:
+    picam2 = Picamera2()
+    # Use video configuration to avoid IMX219 sensor timeout bugs
+    config = picam2.create_video_configuration(main={"size": (1920, 1080)})
+    picam2.configure(config)
+    picam2.start()
+except Exception as e:
+    print(f"❌ Failed to start Picamera2: {e}")
+    print("Switching to bulletproof fallback method...")
+    run_fallback()
+    sys.exit(1)
 
-bytes_data = b''
 img_count = len(list(SAVE_DIR.glob('*.jpg')))
 print(f"✅ Camera active. Found {img_count} existing images in {SAVE_DIR.absolute()}")
 print("INSTRUCTIONS:")
@@ -39,39 +68,29 @@ print("- Press 'ESC' or 'q' to close the window.")
 
 try:
     while True:
-        chunk = process.stdout.read(8192)
-        if not chunk:
-            print("❌ Camera stream ended unexpectedly.")
+        # Capture raw frame from GPU memory
+        frame_rgb = picam2.capture_array("main")
+        
+        # Convert RGB to BGR for OpenCV
+        frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        
+        # Resize to 640x480 for dataset speed
+        frame = cv2.resize(frame, (640, 480))
+        
+        cv2.imshow("🐝 Live Mite Dataset Collector", frame)
+        
+        key = cv2.waitKey(1) & 0xFF
+        if key == 32: # Spacebar
+            filename = SAVE_DIR / f"mite_frame_{img_count:03d}.jpg"
+            cv2.imwrite(str(filename), frame)
+            print(f"✅ Saved: {filename.name}")
+            img_count += 1
+            if img_count % 15 == 0:
+                print("\n🔄 ACTION: Rearrange the seeds to add variety!\n")
+        elif key == 27 or key == ord('q'): # ESC or q
             break
-        bytes_data += chunk
-        
-        # Find start and end of JPEG frame
-        a = bytes_data.find(b'\xff\xd8')
-        b = bytes_data.find(b'\xff\xd9')
-        
-        if a != -1 and b != -1:
-            jpg = bytes_data[a:b+2]
-            bytes_data = bytes_data[b+2:]
-            
-            # Decode JPEG into OpenCV frame
-            frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            
-            if frame is not None:
-                # Resize the 1080p frame down to 640x480 for our dataset
-                frame = cv2.resize(frame, (640, 480))
-                
-                cv2.imshow("🐝 Live Mite Dataset Collector", frame)
-                
-                key = cv2.waitKey(1) & 0xFF
-                if key == 32: # Spacebar
-                    filename = SAVE_DIR / f"mite_frame_{img_count:03d}.jpg"
-                    cv2.imwrite(str(filename), frame)
-                    print(f"✅ Saved: {filename.name}")
-                    img_count += 1
-                    if img_count % 15 == 0:
-                        print("\n🔄 ACTION: Rearrange the seeds to add variety!\n")
-                elif key == 27 or key == ord('q'): # ESC or q
-                    break
+except KeyboardInterrupt:
+    pass
 finally:
-    process.terminate()
+    picam2.stop()
     cv2.destroyAllWindows()
