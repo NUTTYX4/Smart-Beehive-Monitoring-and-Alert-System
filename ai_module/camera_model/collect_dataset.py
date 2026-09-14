@@ -1,5 +1,6 @@
 ﻿import cv2
 import os
+import sys
 import subprocess
 import numpy as np
 from pathlib import Path
@@ -17,7 +18,6 @@ if subprocess.run(["which", "rpicam-vid"], capture_output=True).returncode != 0:
 cmd = [
     cmd_base,
     "-t", "0",
-    "--inline",
     "--codec", "mjpeg",
     "--width", "640",
     "--height", "480",
@@ -26,7 +26,7 @@ cmd = [
     "-o", "-"
 ]
 
-process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=sys.stderr)
 
 bytes_data = b''
 img_count = len(list(SAVE_DIR.glob('*.jpg')))
