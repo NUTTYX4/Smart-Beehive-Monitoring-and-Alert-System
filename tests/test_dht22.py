@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
-"""Unit tests for sensors/dht22_sensor.py using a fake read backend."""
+﻿# -*- coding: utf-8 -*-
+"""Hardware diagnostic + unit tests for the DHT22 temperature/humidity sensor."""
 
 from __future__ import annotations
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import unittest
 from unittest.mock import patch

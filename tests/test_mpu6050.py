@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Unit tests for sensors/mpu6050_sensor.py using a fake I2C bus."""
 
 from __future__ import annotations
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import unittest
 
@@ -12,11 +16,10 @@ class FakeBus:
     def __init__(self) -> None:
         self.written = []
 
-    def write_byte_data(self, addr, reg, value):  # noqa: ANN001
+    def write_byte_data(self, addr, reg, value):
         self.written.append((addr, reg, value))
 
-    def read_byte_data(self, addr, reg):  # noqa: ANN001
-        # Return deterministic bytes so we can predict the decoded value.
+    def read_byte_data(self, addr, reg):
         return 0x01 if reg % 2 == 0 else 0x00
 
 
@@ -29,8 +32,6 @@ class TestMpu6050Sensor(unittest.TestCase):
 
     def test_read_word_decodes_big_endian_pair(self) -> None:
         value = self.sensor._read_word(0x3B)
-        # ACCEL_XOUT_H = 0x3B (odd) => high byte = 0x00; low reg 0x3C (even) => 0x01
-        # decoded = (0x00 << 8) | 0x01 == 1
         self.assertEqual(value, 1)
 
     def test_read_returns_scaled_imu_reading(self) -> None:
@@ -43,7 +44,7 @@ class TestMpu6050Sensor(unittest.TestCase):
         sensor._bus_number = 1
         sensor._address = 0x68
         sensor._bus = None
-        sensor._connect = lambda: False  # simulate hardware absent
+        sensor._connect = lambda: False
         self.assertEqual(sensor._read_word(0x3B), 0)
 
 

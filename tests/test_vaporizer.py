@@ -1,5 +1,11 @@
-﻿#!/usr/bin/env python3
+﻿import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+# -- ensure project root is on sys.path when running directly --
+
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+sys.path.insert(0, __import__('os').path.join(__import__('os').path.dirname(__file__), '..'))
+import sys
 """
 tests/test_vaporizer.py
 ========================
@@ -139,3 +145,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

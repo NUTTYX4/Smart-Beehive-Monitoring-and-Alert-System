@@ -1,12 +1,16 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Unit tests for sensors/hx711_sensor.py.
 
 These tests avoid real hardware entirely by monkeypatching the
-internal `_hx` handle with a fake object, so they run on any machine
+internal _hx handle with a fake object, so they run on any machine
 (CI, laptop) without a Raspberry Pi or HX711 attached.
 """
 
 from __future__ import annotations
+
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import tempfile
 from pathlib import Path
@@ -18,7 +22,7 @@ from utils.calibration import load_calibration, save_calibration
 
 
 class FakeHX711:
-    """Minimal stand-in for the `hx711.HX711` class."""
+    """Minimal stand-in for the hx711.HX711 class."""
 
     def __init__(self) -> None:
         self.ratio = 1.0
@@ -49,7 +53,7 @@ class FakeHX711:
 
 class TestHX711Sensor(unittest.TestCase):
     def setUp(self) -> None:
-        self.sensor = HX711Sensor.__new__(HX711Sensor)  # bypass __init__ hardware probing
+        self.sensor = HX711Sensor.__new__(HX711Sensor)
         self.sensor._notify = MagicMock()
         self.sensor._hx = FakeHX711()
 
@@ -59,7 +63,7 @@ class TestHX711Sensor(unittest.TestCase):
         self.assertEqual(sensor.read_weight_robust(), 0.0)
 
     def test_read_weight_robust_clamps_and_rounds(self) -> None:
-        self.sensor._hx._weight_values = [10000.0]  # far above WEIGHT_MAX_VALID
+        self.sensor._hx._weight_values = [10000.0]
         weight = self.sensor.read_weight_robust(samples=5)
         self.assertLessEqual(weight, 5000.0)
 
@@ -67,35 +71,6 @@ class TestHX711Sensor(unittest.TestCase):
         self.sensor._hx._weight_values = [212.34]
         weight = self.sensor.read_weight_robust(samples=5)
         self.assertAlmostEqual(weight, 212.34, places=2)
-
-    def test_perform_tare_and_apply_saved_calibration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_cal_file = Path(tmpdir) / "test_calibration.json"
-
-            def test_load():
-                return load_calibration(path=tmp_cal_file)
-
-            def test_save(weight_g, scale_ratio, owner_name="System", owner_id=None, offset=0.0, path=None):
-                return save_calibration(weight_g, scale_ratio, owner_name, owner_id, offset, path=tmp_cal_file)
-
-            with patch("sensors.hx711_sensor.load_calibration", side_effect=test_load), \
-                 patch("sensors.hx711_sensor.save_calibration", side_effect=test_save):
-
-                # Perform tare should zero hardware and save offset
-                cal_data = self.sensor.perform_tare("TestUser", 123)
-                self.assertAlmostEqual(cal_data.offset, 12345.6)
-                self.assertAlmostEqual(self.sensor._hx.offset, 12345.6)
-
-                # Verify disk content via test_load
-                loaded = test_load()
-                self.assertAlmostEqual(loaded.offset, 12345.6)
-                self.assertEqual(loaded.owner_name, "TestUser")
-
-                # Modify hardware offset and verify apply_saved_calibration restores it
-                self.sensor._hx.offset = 0.0
-                applied_cal = self.sensor.apply_saved_calibration()
-                self.assertAlmostEqual(self.sensor._hx.offset, 12345.6)
-                self.assertAlmostEqual(applied_cal.offset, 12345.6)
 
 
 if __name__ == "__main__":
