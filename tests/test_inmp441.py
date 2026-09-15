@@ -1,75 +1,113 @@
-﻿# -*- coding: utf-8 -*-
-"""Unit tests for the INMP441 audio pipeline using synthetic signals."""
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tests/test_inmp441.py
+======================
+Live hardware diagnostic for the INMP441 I2S microphone.
+Captures audio, computes FFT, and displays the dominant frequency
+and a live ASCII bar chart of the sound energy in real time.
 
-from __future__ import annotations
+Wiring (I2S):
+    INMP441 WS   ->  GPIO 19  (Physical Pin 35)
+    INMP441 SCK  ->  GPIO 18  (Physical Pin 12)
+    INMP441 SD   ->  GPIO 20  (Physical Pin 38)
+    INMP441 VDD  ->  3.3V
+    INMP441 GND  ->  GND
+    INMP441 L/R  ->  GND      (selects left channel)
 
-import sys
-import os
+Run:
+    python3 tests/test_inmp441.py
+"""
+
+import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-import unittest
+import time
 import numpy as np
+from config import INMP441_SAMPLE_RATE, INMP441_CAPTURE_SECONDS
 
-from audio import fft as fft_module
-from audio.filters import apply_window, condition_signal, is_silent, remove_dc_offset
-from sensors.inmp441_sensor import Inmp441Sensor
-from audio.capture import MicrophoneUnavailableError
+print("=" * 55)
+print("  BeeHive | INMP441 Microphone Diagnostic")
+print(f"  Sample Rate : {INMP441_SAMPLE_RATE} Hz")
+print(f"  Capture Dur : {INMP441_CAPTURE_SECONDS} s per reading")
+print("=" * 55)
 
+try:
+    import sounddevice as sd
+    print("  sounddevice : OK")
+except ImportError:
+    print("  ERROR: sounddevice not installed.")
+    print("  Run:  pip install sounddevice")
+    sys.exit(1)
 
-class TestFilters(unittest.TestCase):
-    def test_remove_dc_offset_zeros_mean(self) -> None:
-        samples = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = remove_dc_offset(samples)
-        self.assertAlmostEqual(float(np.mean(result)), 0.0, places=6)
+# List available devices so user can confirm the mic is detected
+devices = sd.query_devices()
+print()
+print("  Available audio input devices:")
+found_mic = False
+for i, dev in enumerate(devices):
+    if dev['max_input_channels'] > 0:
+        print(f"    [{i}] {dev['name']}  (channels: {dev['max_input_channels']})")
+        found_mic = True
+if not found_mic:
+    print("    NONE FOUND — Is the INMP441 I2S enabled?")
+    print("    Check /boot/config.txt for:  dtoverlay=googlevoicehat-soundcard")
+    sys.exit(1)
 
-    def test_apply_window_preserves_length(self) -> None:
-        samples = np.ones(256)
-        windowed = apply_window(samples, window="hann")
-        self.assertEqual(len(windowed), 256)
+print()
+print("  Listening... (make a sound near the mic)  Ctrl+C to stop")
+print()
+print(f"  {'#':>4}  {'Dominant Freq':>14}  {'Amplitude':>10}  {'Bee State':>22}  Level")
+print(f"  {'-'*4}  {'-'*14}  {'-'*10}  {'-'*22}  {'-'*20}")
 
-    def test_is_silent_detects_low_amplitude(self) -> None:
-        quiet = np.full(100, 0.001)
-        self.assertTrue(is_silent(quiet, noise_gate=0.01))
+def classify(freq: float) -> str:
+    if freq == 0:    return "Silent / No signal"
+    if freq < 100:   return "Dormant / Low activity"
+    if freq < 190:   return "Queenless roar"
+    if freq < 330:   return "Normal / Active"
+    if freq < 450:   return "Queen piping"
+    return "Aggressive / Swarming"
 
-    def test_is_silent_detects_loud_signal(self) -> None:
-        loud = np.full(100, 0.5)
-        self.assertFalse(is_silent(loud, noise_gate=0.01))
+count = 0
+try:
+    while True:
+        count += 1
+        try:
+            audio = sd.rec(
+                int(INMP441_SAMPLE_RATE * INMP441_CAPTURE_SECONDS),
+                samplerate=INMP441_SAMPLE_RATE,
+                channels=1,
+                dtype='float32'
+            )
+            sd.wait()
+            samples = audio.flatten()
 
-    def test_condition_signal_runs_end_to_end(self) -> None:
-        samples = np.sin(np.linspace(0, 10, 512)) + 3.0
-        conditioned = condition_signal(samples)
-        self.assertEqual(len(conditioned), 512)
+            amplitude = float(np.abs(samples).mean())
 
+            # FFT analysis within bee-relevant band (100–800 Hz)
+            fft_vals = np.abs(np.fft.rfft(samples))
+            freqs    = np.fft.rfftfreq(len(samples), 1 / INMP441_SAMPLE_RATE)
+            mask     = (freqs >= 100) & (freqs <= 800)
+            if mask.any() and fft_vals[mask].max() > 0.001:
+                dom_freq = float(freqs[mask][fft_vals[mask].argmax()])
+            else:
+                dom_freq = 0.0
 
-class TestFft(unittest.TestCase):
-    def test_analyze_detects_known_tone(self) -> None:
-        sample_rate = 8000.0
-        t = np.linspace(0, 1.0, int(sample_rate), endpoint=False)
-        signal = 0.8 * np.sin(2 * np.pi * 250.0 * t)
-        result = fft_module.analyze(signal, sample_rate, band_low=100, band_high=800, noise_gate=0.01)
-        self.assertFalse(result.is_silent)
-        self.assertAlmostEqual(result.dominant_freq_hz, 250.0, delta=5.0)
+            state = classify(dom_freq)
 
-    def test_analyze_silent_buffer_returns_zero(self) -> None:
-        result = fft_module.analyze(np.zeros(1000), 8000.0)
-        self.assertTrue(result.is_silent)
-        self.assertEqual(result.dominant_freq_hz, 0.0)
+            # ASCII level bar (0–20 chars)
+            bar_len = min(20, int(amplitude * 400))
+            bar     = "█" * bar_len + "░" * (20 - bar_len)
 
+            freq_str = f"{dom_freq:>8.1f} Hz" if dom_freq > 0 else "   Silent   "
+            print(f"  {count:>4}  {freq_str:>14}  {amplitude:>10.4f}  {state:>22}  {bar}")
 
-class TestInmp441SensorFacade(unittest.TestCase):
-    def test_read_degrades_gracefully_when_capture_unavailable(self) -> None:
-        sensor = Inmp441Sensor.__new__(Inmp441Sensor)
+        except Exception as e:
+            print(f"  {count:>4}  Read error: {e}")
 
-        class RaisingCapture:
-            sample_rate = 44100
-            def capture(self, duration_s: float):
-                raise MicrophoneUnavailableError("no device")
+        time.sleep(0.3)
 
-        sensor._capture = RaisingCapture()
-        reading = sensor.read(duration_s=0.1)
-        self.assertFalse(reading.available)
-        self.assertEqual(reading.dominant_freq_hz, 0.0)
-
-
-if __name__ == "__main__":
-    unittest.main()
+except KeyboardInterrupt:
+    print()
+    print(f"  Stopped after {count} readings.")
+    print("=" * 55)

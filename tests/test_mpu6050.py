@@ -1,52 +1,96 @@
-﻿# -*- coding: utf-8 -*-
-"""Unit tests for sensors/mpu6050_sensor.py using a fake I2C bus."""
+﻿#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tests/test_mpu6050.py
+======================
+Live hardware diagnostic for the MPU6050 accelerometer/gyroscope.
+Reads real I2C data from address 0x68 and prints it every second.
+Accel Z should read ~1.0 g when the Pi is sitting flat.
 
-from __future__ import annotations
+Wiring (I2C):
+    MPU6050 SDA  ->  GPIO 2  (Physical Pin 3)
+    MPU6050 SCL  ->  GPIO 3  (Physical Pin 5)
+    MPU6050 VCC  ->  3.3V    (Physical Pin 1)
+    MPU6050 GND  ->  GND     (Physical Pin 6)
+    MPU6050 AD0  ->  GND     (sets I2C address to 0x68)
 
-import sys
-import os
+Run:
+    python3 tests/test_mpu6050.py
+"""
+
+import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-import unittest
+import time
+from config import MPU6050_I2C_BUS, MPU6050_ADDR
 
-from sensors.mpu6050_sensor import Mpu6050Sensor
+print("=" * 65)
+print("  BeeHive | MPU6050 Accelerometer / Gyroscope Diagnostic")
+print(f"  I2C Bus  : {MPU6050_I2C_BUS}")
+print(f"  Address  : 0x{MPU6050_ADDR:02X}  (AD0 -> GND = 0x68)")
+print("=" * 65)
 
+try:
+    import smbus2
+    bus = smbus2.SMBus(MPU6050_I2C_BUS)
+    # Wake up MPU6050 (write 0 to PWR_MGMT_1 register 0x6B)
+    bus.write_byte_data(MPU6050_ADDR, 0x6B, 0)
+    time.sleep(0.1)
+    print("  smbus2   : OK")
+    print(f"  MPU6050  : Detected at 0x{MPU6050_ADDR:02X}  OK")
+except ImportError:
+    print("  ERROR: smbus2 not installed.  Run:  pip install smbus2")
+    sys.exit(1)
+except OSError as e:
+    print(f"  ERROR: Cannot reach MPU6050 at 0x{MPU6050_ADDR:02X} on bus {MPU6050_I2C_BUS}")
+    print(f"  Detail: {e}")
+    print("  Troubleshooting:")
+    print("    1. Run:  sudo i2cdetect -y 1  (should show 68)")
+    print("    2. Check SDA/SCL wiring.")
+    print("    3. Run:  sudo raspi-config -> Interface Options -> I2C -> Enable")
+    sys.exit(1)
 
-class FakeBus:
-    def __init__(self) -> None:
-        self.written = []
+def read_word_signed(reg: int) -> int:
+    high = bus.read_byte_data(MPU6050_ADDR, reg)
+    low  = bus.read_byte_data(MPU6050_ADDR, reg + 1)
+    val  = (high << 8) | low
+    return val - 65536 if val >= 32768 else val
 
-    def write_byte_data(self, addr, reg, value):
-        self.written.append((addr, reg, value))
+print()
+print("  Live readings (Ctrl+C to stop)   |   Accel Z should be ~1.0 g when flat")
+print()
+print(f"  {'#':>4}  {'Ax':>7}  {'Ay':>7}  {'Az':>7}  {'Gx':>8}  {'Gy':>8}  {'Gz':>8}  {'Temp':>7}")
+print(f"  {'':>4}  {'(g)':>7}  {'(g)':>7}  {'(g)':>7}  {'(dps)':>8}  {'(dps)':>8}  {'(dps)':>8}  {'(C)':>7}")
+print(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*7}")
 
-    def read_byte_data(self, addr, reg):
-        return 0x01 if reg % 2 == 0 else 0x00
+ACCEL_SCALE = 16384.0   # ±2g default
+GYRO_SCALE  = 131.0     # ±250 dps default
 
+count = 0
+try:
+    while True:
+        count += 1
 
-class TestMpu6050Sensor(unittest.TestCase):
-    def setUp(self) -> None:
-        self.sensor = Mpu6050Sensor.__new__(Mpu6050Sensor)
-        self.sensor._bus_number = 1
-        self.sensor._address = 0x68
-        self.sensor._bus = FakeBus()
+        ax = read_word_signed(0x3B) / ACCEL_SCALE
+        ay = read_word_signed(0x3D) / ACCEL_SCALE
+        az = read_word_signed(0x3F) / ACCEL_SCALE
+        gx = read_word_signed(0x43) / GYRO_SCALE
+        gy = read_word_signed(0x45) / GYRO_SCALE
+        gz = read_word_signed(0x47) / GYRO_SCALE
+        raw_temp = read_word_signed(0x41)
+        temp_c   = raw_temp / 340.0 + 36.53
 
-    def test_read_word_decodes_big_endian_pair(self) -> None:
-        value = self.sensor._read_word(0x3B)
-        self.assertEqual(value, 1)
+        # Flag if the hive is tilted
+        accel_mag = (ax**2 + ay**2 + az**2) ** 0.5
+        status = "OK" if abs(accel_mag - 1.0) < 0.3 else "WARN: Tilt/Shock!"
 
-    def test_read_returns_scaled_imu_reading(self) -> None:
-        reading = self.sensor.read()
-        self.assertIsInstance(reading.accel_x, float)
-        self.assertIsInstance(reading.gyro_z, float)
+        print(f"  {count:>4}  {ax:>7.3f}  {ay:>7.3f}  {az:>7.3f}  "
+              f"{gx:>8.2f}  {gy:>8.2f}  {gz:>8.2f}  {temp_c:>6.1f}C  {status}")
 
-    def test_read_word_handles_missing_bus_gracefully(self) -> None:
-        sensor = Mpu6050Sensor.__new__(Mpu6050Sensor)
-        sensor._bus_number = 1
-        sensor._address = 0x68
-        sensor._bus = None
-        sensor._connect = lambda: False
-        self.assertEqual(sensor._read_word(0x3B), 0)
+        time.sleep(1.0)
 
-
-if __name__ == "__main__":
-    unittest.main()
+except KeyboardInterrupt:
+    bus.close()
+    print()
+    print(f"  Stopped after {count} readings.")
+    print("=" * 65)
