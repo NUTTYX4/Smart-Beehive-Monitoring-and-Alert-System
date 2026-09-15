@@ -32,8 +32,8 @@ import numpy as np
 RAW_DIR = Path(__file__).parent / "vision_dataset" / "raw"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-CAPTURE_W    = 640
-CAPTURE_H    = 480
+CAPTURE_W    = 1280
+CAPTURE_H    = 720
 CAM_INDEX    = 0
 WINDOW_TITLE = "BeeHive | Varroa Mite Dataset Collector  [SPACE=save  Q=quit]"
 
@@ -76,7 +76,7 @@ def main() -> None:
 
     if not cap.isOpened():
         print("ERROR: Cannot open camera at index", CAM_INDEX)
-        print("Check that the camera ribbon is seated and 'raspi-config' has the camera enabled.")
+        print("Check that the HP W200 USB webcam is plugged in and detected (run: ls /dev/video*).")
         sys.exit(1)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
@@ -85,7 +85,7 @@ def main() -> None:
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # minimise preview lag
 
     count = count_existing()
-    print(f"Camera live at {CAPTURE_W}x{CAPTURE_H}.")
+    print(f"HP W200 USB webcam live at {CAPTURE_W}x{CAPTURE_H}.")
     print(f"Saving to    : {RAW_DIR.resolve()}")
     print(f"Images so far: {count}")
     print("Controls     : SPACE = capture   Q/ESC = quit\n")
@@ -133,3 +133,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

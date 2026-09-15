@@ -50,8 +50,8 @@ except ImportError:
 _DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano.pt"
 _DEFAULT_CAM_INDEX   = 0
 _DEFAULT_INFER_EVERY = 60      # seconds between AI scans
-_CAPTURE_W           = 640
-_CAPTURE_H           = 480
+_CAPTURE_W           = 1280
+_CAPTURE_H           = 720
 _CONF_THRESHOLD      = 0.25
 
 
@@ -188,7 +188,7 @@ class VarroaVisionEngine:
         if not self._open_camera():
             logger.error(
                 "VarroaVisionEngine: cannot open camera at index %d. "
-                "Check that /dev/video0 exists and is not in use.",
+                "Check that the HP W200 USB webcam is plugged into a USB 3.0 port and /dev/video0 exists.",
                 self._cam_index,
             )
             return
@@ -285,3 +285,4 @@ class VarroaVisionEngine:
         except Exception as exc:
             logger.error("Static-image inference error: %s", exc)
         return result_payload
+
