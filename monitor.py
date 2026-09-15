@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 monitor.py
@@ -72,22 +72,22 @@ def _build_hive_update_message(sensor: dict, behavior: str) -> str:
     weather = weather_service.get_current_conditions()
     loc_str = weather.get("city", "Auto-IP")
     if weather.get("valid"):
-        ext_str = f"`{weather['temperature']:.1f} °C` | `{weather['humidity']:.1f}% RH` ({weather['description']})"
+        ext_str = f"`{weather['temperature']:.1f} Â°C` | `{weather['humidity']:.1f}% RH` ({weather['description']})"
     else:
         ext_str = "`Unavailable (Offline)`"
 
     return f"""
 *BEEHIVE TELEMETRY REPORT*
 Timestamp: `{sensor['datestamp']}` | Location: `{loc_str}`
-─────────────────────────────
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 *Colony State:* `{behavior}`{confidence_str}
-*Internal Climate:* `{sensor['temperature']:.1f} °C` | `{sensor['humidity']:.1f}% RH`
+*Internal Climate:* `{sensor['temperature']:.1f} Â°C` | `{sensor['humidity']:.1f}% RH`
 *External Weather:* {ext_str}
 *Scale Net Weight:* `{sensor['weight']:.2f} g`
 *Acoustic Signature:* `{sensor['dominant_freq']:.2f} Hz`
 *Structural Integrity:* Nominal (Vector stable)
-*📷 Computer Vision:* `Mite Count: {sensor.get('mite_count', 0)}`
-─────────────────────────────
+*ðŸ“· Computer Vision:* `Mite Count: {sensor.get('mite_count', 0)}`
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Status: [ONLINE] Nominal Operations
 """.strip()
 
@@ -105,7 +105,7 @@ def _parse_args() -> tuple[float, str, str]:
 def main() -> None:
     missing = validate_secrets()
     if missing:
-        logger.critical("Missing required secrets: %s — set them in environment or token.md", ", ".join(missing))
+        logger.critical("Missing required secrets: %s â€” set them in environment or token.md", ", ".join(missing))
         raise SystemExit(1)
 
     signal.signal(signal.SIGTERM, _handle_shutdown)
@@ -120,6 +120,7 @@ def main() -> None:
     inmp441 = Inmp441Sensor()
     relay_actuator = RelayActuator()
     vision_engine = VarroaVisionEngine()
+    vision_engine.start()   # launches non-blocking feed + inference threads
 
     csv_logger = CsvLogger()
     thingspeak = ThingSpeakUploader()
@@ -135,7 +136,7 @@ def main() -> None:
     saved_cal = load_calibration()
 
     if saved_cal.scale_ratio != 1.0:
-        # Valid persisted calibration — apply directly (no re-weigh)
+        # Valid persisted calibration â€” apply directly (no re-weigh)
         hx711.apply_saved_calibration()
         logger.info(
             "Applied saved calibration: ratio=%.6f, weight=%.2fg (by %s)",
@@ -149,15 +150,15 @@ def main() -> None:
             if last_logged_weight is not None:
                 startup_weight = hx711.read_weight_robust(samples=7)
                 diff = abs(startup_weight - last_logged_weight)
-                logger.info("🔍 [Internal Verification] Startup live weight: %.2fg | Last logged state: %.2fg (Diff: %.2fg)", startup_weight, last_logged_weight, diff)
+                logger.info("ðŸ” [Internal Verification] Startup live weight: %.2fg | Last logged state: %.2fg (Diff: %.2fg)", startup_weight, last_logged_weight, diff)
                 if diff <= 50.0:
-                    logger.info("✅ Startup weight aligns cleanly with pre-reboot state!")
+                    logger.info("âœ… Startup weight aligns cleanly with pre-reboot state!")
                 else:
-                    logger.warning("⚠️ Startup weight differs significantly from last logged state by %.2fg", diff)
+                    logger.warning("âš ï¸ Startup weight differs significantly from last logged state by %.2fg", diff)
         except Exception as exc:
             logger.debug("Internal startup weight check skipped: %s", exc)
     else:
-        # No prior calibration — run the full guided sequence
+        # No prior calibration â€” run the full guided sequence
         hx711.calibrate(init_weight or DEFAULT_CALIBRATION_WEIGHT_G, starter_name, owner_id)
 
     send_message(TELEGRAM_LOG_CHANNEL, f"[SYSTEM] Hive Telemetry Service initialized by {starter_name}")
@@ -177,7 +178,7 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Unhandled error during monitor cycle: %s\n%s", exc, traceback.format_exc())
                     # Never crash: log, alert, and continue on the next cycle.
-                    send_message(TELEGRAM_LOG_CHANNEL, f"⚠️ *Monitor cycle error (recovered):* `{exc}`")
+                    send_message(TELEGRAM_LOG_CHANNEL, f"âš ï¸ *Monitor cycle error (recovered):* `{exc}`")
                 finally:
                     last_cycle = now
                     heartbeat.beat()
@@ -185,8 +186,9 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        vision_engine.stop()   # clean shutdown of camera threads
         logger.info("Monitor stopping")
-        send_message(TELEGRAM_LOG_CHANNEL, "🛑 *Stopped*")
+        send_message(TELEGRAM_LOG_CHANNEL, "ðŸ›‘ *Stopped*")
 
 
 def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, csv_logger, thingspeak, ctx: AlertContext) -> None:
@@ -233,3 +235,4 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, cs
 
 if __name__ == "__main__":
     main()
+

@@ -1,138 +1,287 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-ai_module/vision_engine.py
-==========================
-Vision module for detecting Varroa mites (using sprouted horse gram seeds
-as a proxy for the hackathon). Uses a Raspberry Pi Camera V2 and a YOLOv8 Nano model.
+ai_module/camera_model/vision_engine.py
+========================================
+Varroa mite vision engine — Raspberry Pi 4 Edition.
+
+Architecture (Pi 4 optimised):
+  - Live feed  : cv2.VideoCapture (V4L2, /dev/video0) runs continuously in a
+                 daemon thread so the display never freezes.
+  - AI inference: triggered in a SECOND daemon thread on a configurable
+                 interval (default 60 s) so the CPU never pins at 100 %.
+  - main thread : call `get_latest_result()` at any time — always instant,
+                 never blocking, never crashes the monitor loop.
+
+No libcamerify, no Picamera2, no subprocess wrappers needed on Pi 4.
 """
 
+import threading
 import time
 from pathlib import Path
+from typing import Dict
+
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# --------------------------------------------------------------------------
+# Optional heavy imports
+# --------------------------------------------------------------------------
 try:
     import cv2
+    _CV2_OK = True
+except ImportError:
+    cv2 = None  # type: ignore
+    _CV2_OK = False
+    logger.warning("OpenCV not installed — VarroaVisionEngine disabled.")
+
+try:
     from ultralytics import YOLO
-except ImportError as e:
-    logger.warning("Vision engine dependencies not met: %s", e)
-    cv2 = None
-    YOLO = None
+    _YOLO_OK = True
+except ImportError:
+    YOLO = None  # type: ignore
+    _YOLO_OK = False
+    logger.warning("Ultralytics not installed — YOLO inference disabled.")
 
+
+# --------------------------------------------------------------------------
+# Constants (can be overridden via constructor kwargs)
+# --------------------------------------------------------------------------
+_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano.pt"
+_DEFAULT_CAM_INDEX   = 0
+_DEFAULT_INFER_EVERY = 60      # seconds between AI scans
+_CAPTURE_W           = 640
+_CAPTURE_H           = 480
+_CONF_THRESHOLD      = 0.25
+
+
+# --------------------------------------------------------------------------
 class VarroaVisionEngine:
-    def __init__(self, model_path: str = "ai_module/varroa_nano.pt"):
-        self._model_path = Path(model_path)
-        self._model = None
-        self.available = False
+    """
+    Thread-safe, non-blocking vision engine for Raspberry Pi 4.
 
-        if cv2 is not None and YOLO is not None:
-            try:
-                # Load the YOLO model (we don't strictly check for the file here because 
-                # ultralytics might try to download or create a default if not found, 
-                # but it's best if the user places varroa_nano.pt there).
-                if not self._model_path.exists():
-                    logger.warning("YOLO model file not found at %s. Inference will fail if it's not downloaded.", self._model_path)
-                
-                self._model = YOLO(str(self._model_path))
-                self.available = True
-                logger.info("VarroaVisionEngine loaded YOLO model from %s", self._model_path)
-            except Exception as e:
-                logger.error("Failed to load YOLO model: %s", e)
-        else:
-            logger.warning("OpenCV or Ultralytics not installed. VarroaVisionEngine disabled.")
+    Usage
+    -----
+    engine = VarroaVisionEngine()
+    engine.start()                        # call once — starts background threads
 
-    def detect_mites(self, conf: float = 0.25) -> dict:
-        """
-        Briefly opens the camera, reads one frame, runs inference to count
-        mites (or seeds), and releases the camera immediately.
-        Returns a dict: {"mite_count": int, "available": bool}
-        """
-        result_payload = {"mite_count": 0, "available": False}
-        
-        if not self.available or self._model is None:
-            return result_payload
-        
-        frame = None
-        
-        # 1. Try native Raspberry Pi 5 libcamera stack (rpicam-jpeg or libcamera-jpeg)
-        import subprocess
-        import numpy as np
-        
-        for cmd in ["rpicam-jpeg", "libcamera-jpeg"]:
-            try:
-                # -t 100: wait 100ms for exposure to settle
-                # -o -: output to stdout
-                # --nopreview: don't show preview window
-                res = subprocess.run([cmd, "-t", "100", "-o", "-", "--nopreview", "--width", "1920", "--height", "1080"], 
-                                     capture_output=True, check=False)
-                if res.returncode == 0 and len(res.stdout) > 1024:
-                    image_array = np.frombuffer(res.stdout, dtype=np.uint8)
-                    frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-                    break
-            except FileNotFoundError:
-                continue
-                
-        # 2. Fallback to OpenCV V4L2 if libcamera commands failed or not found
-        if frame is None:
-            cap = None
-            try:
-                cap = cv2.VideoCapture(0)
-                if cap.isOpened():
-                    ret, frame_cap = cap.read()
-                    if ret:
-                        frame = frame_cap
-            finally:
-                if cap is not None:
-                    cap.release()
+    result = engine.get_latest_result()   # always returns instantly
+    # {"mite_count": int, "available": bool, "last_scan_ts": float | None}
 
-        if frame is None:
-            logger.error("Failed to capture frame from any camera backend.")
-            return result_payload
-            
+    engine.stop()                         # clean shutdown
+    """
+
+    def __init__(self,
+                 model_path: str = _DEFAULT_MODEL_PATH,
+                 cam_index: int  = _DEFAULT_CAM_INDEX,
+                 infer_every: float = _DEFAULT_INFER_EVERY):
+
+        self._model_path  = Path(model_path)
+        self._cam_index   = cam_index
+        self._infer_every = infer_every
+
+        self._model   = None
+        self.available = False          # True once YOLO model is loaded
+
+        self._cap     = None            # cv2.VideoCapture, owned by _feed_thread
+        self._lock    = threading.Lock()
+        self._stop_event = threading.Event()
+
+        # Shared state — written by inference thread, read by caller
+        self._latest_frame  = None
+        self._latest_result: Dict = {
+            "mite_count": 0,
+            "available": False,
+            "last_scan_ts": None,
+        }
+
+        self._feed_thread  : threading.Thread | None = None
+        self._infer_thread : threading.Thread | None = None
+
+        self._load_model()
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+    def _load_model(self) -> None:
+        if not (_CV2_OK and _YOLO_OK):
+            return
+        if not self._model_path.exists():
+            logger.warning(
+                "YOLO model not found at %s — inference disabled until model is trained.",
+                self._model_path,
+            )
+            return
         try:
-            # Run inference
-            results = self._model.predict(source=frame, conf=conf, verbose=False)
-            
-            # Count detected bounding boxes
-            count = 0
-            if results and len(results) > 0:
-                count = len(results[0].boxes)
-                
-            result_payload["mite_count"] = count
-            result_payload["available"] = True
-            
-        except Exception as e:
-            logger.error("Error during mite detection inference: %s", e)
-                
-        return result_payload
+            self._model = YOLO(str(self._model_path))
+            self.available = True
+            logger.info("VarroaVisionEngine: YOLO model loaded from %s", self._model_path)
+        except Exception as exc:
+            logger.error("Failed to load YOLO model: %s", exc)
 
-    def detect_mites_from_image(self, image_path: str, conf: float = 0.25) -> dict:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        """Launch background camera-feed and inference threads."""
+        if not _CV2_OK:
+            logger.warning("OpenCV unavailable — VarroaVisionEngine not started.")
+            return
+
+        self._feed_thread = threading.Thread(
+            target=self._feed_loop, name="vision-feed", daemon=True
+        )
+        self._infer_thread = threading.Thread(
+            target=self._inference_loop, name="vision-infer", daemon=True
+        )
+        self._feed_thread.start()
+        self._infer_thread.start()
+        logger.info("VarroaVisionEngine started (infer every %.0fs).", self._infer_every)
+
+    def stop(self) -> None:
+        """Signal both threads to exit and wait up to 3 s each."""
+        self._stop_event.set()
+        for t in (self._feed_thread, self._infer_thread):
+            if t and t.is_alive():
+                t.join(timeout=3)
+        if self._cap and self._cap.isOpened():
+            self._cap.release()
+        logger.info("VarroaVisionEngine stopped.")
+
+    def get_latest_result(self) -> Dict:
+        """Return the most recent mite-count result (always instant)."""
+        with self._lock:
+            return dict(self._latest_result)
+
+    # Convenience alias so monitor.py can keep calling detect_mites()
+    def detect_mites(self, conf: float = _CONF_THRESHOLD) -> Dict:
+        return self.get_latest_result()
+
+    # ------------------------------------------------------------------
+    # Background threads
+    # ------------------------------------------------------------------
+    def _open_camera(self) -> bool:
         """
-        Runs inference on a static image file.
-        Returns a dict: {"mite_count": int, "available": bool}
+        Open /dev/video0 via V4L2 (standard Pi 4 path).
+        Returns True on success.
         """
+        self._cap = cv2.VideoCapture(self._cam_index, cv2.CAP_V4L2)
+        if not self._cap.isOpened():
+            # Fallback: let OpenCV pick any available backend
+            self._cap = cv2.VideoCapture(self._cam_index)
+        if not self._cap.isOpened():
+            return False
+
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  _CAPTURE_W)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, _CAPTURE_H)
+        self._cap.set(cv2.CAP_PROP_FPS, 30)
+        # Reduce internal buffer to 1 frame — keeps preview latency minimal
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return True
+
+    def _feed_loop(self) -> None:
+        """
+        Continuously reads frames from the camera.
+        Keeps self._latest_frame fresh for the inference thread.
+        Never runs YOLO here — CPU stays well under budget.
+        """
+        if not self._open_camera():
+            logger.error(
+                "VarroaVisionEngine: cannot open camera at index %d. "
+                "Check that /dev/video0 exists and is not in use.",
+                self._cam_index,
+            )
+            return
+
+        logger.info("VarroaVisionEngine: camera feed running at %dx%d.",
+                    _CAPTURE_W, _CAPTURE_H)
+
+        while not self._stop_event.is_set():
+            ret, frame = self._cap.read()
+            if not ret:
+                logger.warning("VarroaVisionEngine: missed a frame — retrying.")
+                time.sleep(0.05)
+                continue
+            with self._lock:
+                self._latest_frame = frame
+
+        self._cap.release()
+
+    def _inference_loop(self) -> None:
+        """
+        Waits `infer_every` seconds, grabs the latest frame,
+        runs YOLO Nano, and writes the result to `_latest_result`.
+        Completely decoupled from the feed — the feed always stays smooth.
+        """
+        if not self.available:
+            logger.info(
+                "VarroaVisionEngine: inference loop idle (no model loaded)."
+            )
+            return
+
+        # Wait for the feed thread to deliver the first frame
+        for _ in range(50):                      # up to 5 s
+            if self._stop_event.is_set():
+                return
+            with self._lock:
+                has_frame = self._latest_frame is not None
+            if has_frame:
+                break
+            time.sleep(0.1)
+
+        while not self._stop_event.is_set():
+            # Sleep in small chunks so we can respond to stop_event quickly
+            for _ in range(int(self._infer_every * 10)):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(0.1)
+
+            with self._lock:
+                frame = self._latest_frame.copy() if self._latest_frame is not None else None
+
+            if frame is None:
+                continue
+
+            try:
+                results = self._model.predict(
+                    source=frame,
+                    conf=_CONF_THRESHOLD,
+                    verbose=False,
+                    device="cpu",   # force CPU — no CUDA on Pi 4
+                    half=False,     # half-precision only useful on GPU
+                )
+                count = len(results[0].boxes) if results else 0
+                ts    = time.time()
+
+                with self._lock:
+                    self._latest_result = {
+                        "mite_count": count,
+                        "available":  True,
+                        "last_scan_ts": ts,
+                    }
+
+                logger.info(
+                    "VarroaVisionEngine: scan complete — %d mite(s) detected.", count
+                )
+            except Exception as exc:
+                logger.error("VarroaVisionEngine inference error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Legacy static-image helper (unchanged)
+    # ------------------------------------------------------------------
+    def detect_mites_from_image(self, image_path: str, conf: float = _CONF_THRESHOLD) -> Dict:
+        """Run inference on a saved image file (used by test_vision.py)."""
         result_payload = {"mite_count": 0, "available": False}
-        
-        if not self.available or self._model is None:
+        if not (self.available and _CV2_OK):
             return result_payload
-            
         try:
             frame = cv2.imread(image_path)
             if frame is None:
-                logger.error("Could not read image file: %s", image_path)
+                logger.error("Cannot read image: %s", image_path)
                 return result_payload
-                
             results = self._model.predict(source=frame, conf=conf, verbose=False)
-            
-            count = 0
-            if results and len(results) > 0:
-                count = len(results[0].boxes)
-                
-            result_payload["mite_count"] = count
-            result_payload["available"] = True
-            
-        except Exception as e:
-            logger.error("Error during static image inference: %s", e)
-            
+            count   = len(results[0].boxes) if results else 0
+            result_payload.update({"mite_count": count, "available": True})
+        except Exception as exc:
+            logger.error("Static-image inference error: %s", exc)
         return result_payload
