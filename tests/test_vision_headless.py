@@ -24,7 +24,7 @@ except Exception as e:
     sys.exit(1)
 
 # Paths
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ai_module', 'camera_model', 'varroa_nano.pt')
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ai_module', 'camera_model', 'varroa_nano.onnx')
 
 def main():
     print("3. Loading YOLOv8 Nano model...")
@@ -72,3 +72,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

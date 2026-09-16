@@ -17,7 +17,7 @@ import cv2
 from ultralytics import YOLO
 
 # Paths
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ai_module', 'camera_model', 'varroa_nano.pt')
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ai_module', 'camera_model', 'varroa_nano.onnx')
 CAM_INDEX = 0
 CAPTURE_W = 1280
 CAPTURE_H = 720
@@ -97,3 +97,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
