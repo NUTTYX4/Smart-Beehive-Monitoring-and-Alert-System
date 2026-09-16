@@ -21,19 +21,33 @@ DATA_DIR = Path("dataset_v2/raw")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def main():
+    # Fix for Raspberry Pi Wayland + OpenCV Qt backend crashes
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+    
     print("Starting USB Webcam... A live feed window will appear.")
     print("Press ENTER in the terminal to capture, or type 'q' to quit.")
     
-    # Force V4L2 backend to prevent GStreamer pipeline errors with USB webcams on Pi
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    
+    # Auto-detect USB webcam index (sometimes it's not 0 on Pi)
+    cap = None
+    for cam_idx in range(5):
+        print(f"Trying camera index {cam_idx} with V4L2...")
+        cap = cv2.VideoCapture(cam_idx, cv2.CAP_V4L2)
+        if cap.isOpened():
+            # Test if we can actually read a frame
+            ret, _ = cap.read()
+            if ret:
+                print(f"✅ Successfully opened camera at index {cam_idx}")
+                break
+            else:
+                cap.release()
+                
+    if cap is None or not cap.isOpened():
+        print("❌ Error: Could not open any camera. Please check your USB connection.")
+        return
+        
     # Try to set high resolution
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    
-    if not cap.isOpened():
-        print("Error: Could not open camera.")
-        return
     
     count = 0
     capture_flag = False
