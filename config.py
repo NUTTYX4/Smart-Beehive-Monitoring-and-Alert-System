@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 config.py
 =========
@@ -25,6 +25,7 @@ SECURITY NOTE:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -179,7 +180,7 @@ LOG_BACKUP_COUNT: Final[int] = _env_int("BEEHIVE_LOG_BACKUP_COUNT", 5)
 # Process control (used by bot.py to launch/stop monitor.py)
 # -------------------------------------------------------------------
 MONITOR_SCRIPT: Final[Path] = BASE_DIR / "monitor.py"
-PYTHON_EXECUTABLE: Final[str] = _env("BEEHIVE_PYTHON", "python3")
+PYTHON_EXECUTABLE: Final[str] = _env("BEEHIVE_PYTHON", sys.executable)
 
 # -------------------------------------------------------------------
 # AI module
@@ -210,3 +211,4 @@ def validate_secrets() -> list:
     if not TELEGRAM_LOG_CHANNEL:
         missing.append("BEEHIVE_CHANNEL")
     return missing
+

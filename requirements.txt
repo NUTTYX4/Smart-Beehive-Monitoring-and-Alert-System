@@ -48,3 +48,5 @@ onnxruntime>=1.17.0
 flask>=3.0.0
 werkzeug>=3.0.0
 
+
+Pillow>=10.0.0
