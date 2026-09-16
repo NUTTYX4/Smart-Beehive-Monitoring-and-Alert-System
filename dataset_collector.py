@@ -3,7 +3,7 @@
 """
 dataset_collector.py
 ====================
-Sandbox utility for capturing raw images from the camera
+Sandbox utility for capturing raw images from the USB webcam
 for YOLO model training.
 
 Shows a live video feed window.
@@ -15,44 +15,26 @@ import cv2
 import os
 import time
 import threading
-import subprocess
-import numpy as np
 from pathlib import Path
 
 DATA_DIR = Path("dataset_v2/raw")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-def get_native_cmd():
-    if subprocess.run(["which", "rpicam-vid"], capture_output=True).returncode == 0:
-        return "rpicam-vid"
-    elif subprocess.run(["which", "libcamera-vid"], capture_output=True).returncode == 0:
-        return "libcamera-vid"
-    return None
-
 def main():
-    print("Starting camera stream... A live feed window will appear.")
+    print("Starting USB Webcam... A live feed window will appear.")
     print("Press ENTER in the terminal to capture, or type 'q' to quit.")
     
-    cmd_base = get_native_cmd()
-    cap = None
-    process = None
+    # Force V4L2 backend to prevent GStreamer pipeline errors with USB webcams on Pi
+    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
     
-    if cmd_base:
-        print(f"Optimal framework detected: Using native {cmd_base} for Pi 5 compatibility...")
-        # Stream MJPEG to stdout
-        cmd = [
-            cmd_base, "-t", "0", "--codec", "mjpeg", 
-            "--width", "1920", "--height", "1080", 
-            "--framerate", "15", "--inline", "-o", "-"
-        ]
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    else:
-        print("Native tools not found, falling back to basic OpenCV...")
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Could not open camera.")
-            return
-
+    # Try to set high resolution
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        return
+    
     count = 0
     capture_flag = False
     quit_flag = False
@@ -67,43 +49,28 @@ def main():
             else:
                 capture_flag = True
                 
+    # Run terminal input in a separate thread so it doesn't block cv2.imshow
     input_thread = threading.Thread(target=terminal_input, daemon=True)
     input_thread.start()
     
-    bytes_data = b''
-    
     try:
         while not quit_flag:
-            frame = None
-            
-            if process:
-                # Read from native MJPEG stream
-                bytes_data += process.stdout.read(4096)
-                a = bytes_data.find(b'\xff\xd8')
-                b = bytes_data.find(b'\xff\xd9')
-                if a != -1 and b != -1:
-                    jpg = bytes_data[a:b+2]
-                    bytes_data = bytes_data[b+2:]
-                    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            else:
-                # Read from standard OpenCV
-                ret, frame = cap.read()
-                if not ret:
-                    time.sleep(0.1)
-                    continue
-            
-            if frame is None:
+            ret, frame = cap.read()
+            if not ret:
+                print("Warning: Failed to grab frame.")
+                time.sleep(0.1)
                 continue
-
+                
             # Show live feed
-            display_frame = cv2.resize(frame, (960, 540)) 
+            display_frame = cv2.resize(frame, (960, 540)) # Resize for display so it fits on screen
             cv2.imshow("Live Feed - Press Q in terminal to quit", display_frame)
             
+            # Wait for 1ms, needed for imshow to work. Also check for 'q' key in the window
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:
+            if key == ord('q') or key == 27: # q or Esc
                 quit_flag = True
                 break
-            elif key == ord(' ') or key == 13: 
+            elif key == ord(' ') or key == 13: # Space or Enter in cv window
                 capture_flag = True
                 
             if capture_flag:
@@ -119,11 +86,7 @@ def main():
         print("\nExiting.")
     finally:
         quit_flag = True
-        if process:
-            process.terminate()
-            process.wait()
-        if cap:
-            cap.release()
+        cap.release()
         cv2.destroyAllWindows()
         print("Camera released.")
 
