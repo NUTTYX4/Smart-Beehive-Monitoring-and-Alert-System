@@ -197,3 +197,19 @@ def send_channel_log(channel: str, text: str) -> bool:
 def send_data_and_alerts(channel: str, data_message: str, alerts: List[str]) -> bool:
     alert_section = "\n".join(alerts) + "\n\n" if alerts else ""
     return send_message(channel, alert_section + data_message)
+
+def send_photo(chat_id: str, photo_path: str, caption: str = "") -> bool:
+    """Send a photo via raw Bot API HTTPS call."""
+    url = f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    payload = {"chat_id": chat_id, "caption": caption, "parse_mode": "Markdown"}
+    try:
+        with open(photo_path, "rb") as f:
+            files = {"photo": f}
+            resp = _session.post(url, data=payload, files=files, timeout=15)
+        if resp.status_code != 200:
+            logger.warning("Telegram sendPhoto non-200: %s %s", resp.status_code, resp.text[:200])
+            return False
+        return True
+    except Exception as exc:
+        logger.error("Telegram sendPhoto failed: %s", exc)
+        return False

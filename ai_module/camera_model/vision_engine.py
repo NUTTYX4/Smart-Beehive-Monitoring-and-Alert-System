@@ -47,7 +47,7 @@ except ImportError:
 # --------------------------------------------------------------------------
 # Constants (can be overridden via constructor kwargs)
 # --------------------------------------------------------------------------
-_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano.pt"
+_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano.onnx"
 _DEFAULT_CAM_INDEX   = 0
 _DEFAULT_INFER_EVERY = 60      # seconds between AI scans
 _CAPTURE_W           = 1280
@@ -252,6 +252,13 @@ class VarroaVisionEngine:
                 )
                 count = len(results[0].boxes) if results else 0
                 ts    = time.time()
+
+                try:
+                    out_path = Path("data/latest_vision.jpg")
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(out_path), results[0].plot())
+                except Exception as exc:
+                    logger.error("Failed to save vision frame: %s", exc)
 
                 with self._lock:
                     self._latest_result = {

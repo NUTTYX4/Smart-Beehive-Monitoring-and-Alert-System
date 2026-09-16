@@ -229,6 +229,12 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, cs
     message = _build_hive_update_message(sensor, behavior)
     send_data_and_alerts(TELEGRAM_LOG_CHANNEL, message, alerts)
 
+    if vaporizer_active:
+        from tgbot.alerts import send_photo
+        photo_path = "data/latest_vision.jpg"
+        if os.path.exists(photo_path):
+            send_photo(TELEGRAM_LOG_CHANNEL, photo_path, caption=f"🚨 *VAPORIZER TRIGGERED*\nMite count: {mite_count}")
+
     csv_logger.log(sensor, behavior=behavior)
     thingspeak.upload_all(sensor)
 

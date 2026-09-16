@@ -306,7 +306,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     restricted_actions = {
         "start_init_member", "stop_script_member", "change_calibration", "tare_hive",
         "check_pi_health", "system_info", "uptime_info", "download_data_csv",
-        "manage_admins", "cal_mode_bottle", "cal_mode_standard",
+        "manage_admins", "cal_mode_bottle", "cal_mode_standard", "request_photo",
     }
     if action in restricted_actions and not is_approved(uid):
         await query.answer("Access Denied. Approved Admin status required.", show_alert=True)
@@ -365,6 +365,33 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup=keyboards.back_to_menu(),
             parse_mode=ParseMode.MARKDOWN,
         )
+    elif action == "request_photo":
+        await query.answer("📷 Capturing... this might take a moment.", show_alert=True)
+        photo_path = "data/latest_vision.jpg"
+        if not os.path.exists(photo_path):
+            await query.edit_message_text(
+                "❌ No recent photo available. Ensure the monitor is running.",
+                reply_markup=keyboards.back_to_menu()
+            )
+            return
+        try:
+            with open(photo_path, "rb") as f:
+                await context.bot.send_photo(
+                    chat_id=uid,
+                    photo=f,
+                    caption="*📷 LATEST HIVE CAMERA SCAN*\nHere is the most recent AI analysis.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            # Send an empty menu text so we can show the back button below the photo
+            await context.bot.send_message(
+                chat_id=uid,
+                text="_Photo sent above._",
+                reply_markup=keyboards.back_to_menu(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as exc:
+            logger.error("Failed to send photo: %s", exc)
+            await query.edit_message_text(f"❌ Failed to send photo: {exc}", reply_markup=keyboards.back_to_menu())
     elif action == "main_menu":
         if is_approved(uid):
             await query.edit_message_text(
