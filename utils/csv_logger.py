@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import HIVE_DATA_CSV
+from config import HIVE_DATA_CSV, TREATMENT_LOG_CSV
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -75,6 +75,23 @@ class CsvLogger:
                     csv.writer(fh).writerow(row)
             except OSError as exc:
                 logger.error("Failed to append CSV row: %s", exc)
+
+    def log_treatment(self, timestamp: str, mite_count: int, duration_s: float) -> None:
+        """Log a vaporizer treatment event to the dedicated CSV log."""
+        treatment_path = Path(TREATMENT_LOG_CSV)
+        with _lock:
+            if not treatment_path.exists() or treatment_path.stat().st_size == 0:
+                try:
+                    with open(treatment_path, "w", newline="") as fh:
+                        csv.writer(fh).writerow(["Timestamp", "Mite Count", "Duration (s)"])
+                except OSError as exc:
+                    logger.error("Failed to write treatment log header: %s", exc)
+            
+            try:
+                with open(treatment_path, "a", newline="") as fh:
+                    csv.writer(fh).writerow([timestamp, mite_count, round(duration_s, 1)])
+            except OSError as exc:
+                logger.error("Failed to append to treatment log: %s", exc)
 
     def get_last_logged_weight(self) -> Optional[float]:
         """Read the last logged weight from CSV for internal startup verification."""

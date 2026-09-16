@@ -25,6 +25,10 @@ def main_menu(is_running: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Sensor Telemetry", callback_data="sensor_readings"),
         ],
         [
+            InlineKeyboardButton("Varroa Management", callback_data="menu_varroa"),
+            InlineKeyboardButton("Yield Forecasting", callback_data="menu_yield"),
+        ],
+        [
             InlineKeyboardButton("Calibrate Scale", callback_data="change_calibration"),
             InlineKeyboardButton("Tare (Zero) Hive", callback_data="tare_hive"),
         ],
@@ -76,6 +80,26 @@ def calibration_mode_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("Option 1: Static Container Tare (~284g)", callback_data="cal_mode_bottle")],
         [InlineKeyboardButton("Option 2: Standard Empty Calibration", callback_data="cal_mode_standard")],
+        [InlineKeyboardButton("Back to Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def varroa_menu() -> InlineKeyboardMarkup:
+    """Sub-menu for Varroa Management operations."""
+    keyboard = [
+        [InlineKeyboardButton("Treatment Statistics", callback_data="treatment_stats")],
+        [InlineKeyboardButton("Manual Camera Scan", callback_data="request_photo")],
+        [InlineKeyboardButton("Back to Menu", callback_data="main_menu")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def yield_forecasting_menu() -> InlineKeyboardMarkup:
+    """Sub-menu for Honey Yield Forecasting modes."""
+    keyboard = [
+        [InlineKeyboardButton("Predict Days to Target Weight", callback_data="forecast_days")],
+        [InlineKeyboardButton("Predict Weight in N Days", callback_data="forecast_weight")],
         [InlineKeyboardButton("Back to Menu", callback_data="main_menu")],
     ]
     return InlineKeyboardMarkup(keyboard)

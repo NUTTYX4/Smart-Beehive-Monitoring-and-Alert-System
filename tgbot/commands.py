@@ -294,6 +294,124 @@ def _latest_sensor_row() -> Optional[str]:
         return None
 
 
+def _latest_sensor_row_dict() -> Optional[dict]:
+    if not HIVE_DATA_CSV.exists():
+        return None
+    try:
+        with open(HIVE_DATA_CSV, "r") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return None
+        headers = lines[0].split(",")
+        values = lines[-1].split(",")
+        return dict(zip(headers, values))
+    except OSError:
+        return None
+
+
+def _treatment_stats_text() -> str:
+    from config import TREATMENT_LOG_CSV
+    if not TREATMENT_LOG_CSV.exists():
+        return "No treatment records found."
+    try:
+        with open(TREATMENT_LOG_CSV, "r") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return "No treatment records found."
+        
+        headers = lines[0].split(",")
+        records = lines[1:]
+        
+        last_treatment = records[-1].split(",")
+        total_treatments = len(records)
+        
+        return (
+            "*VARROA TREATMENT LOGS*\n"
+            "─────────────────────────────\n"
+            f"*Total Treatments:* `{total_treatments}`\n"
+            f"*Last Treatment:* `{last_treatment[0]}`\n"
+            f"*Last Mite Count:* `{last_treatment[1]}`\n"
+            f"*Duration:* `{last_treatment[2]}s`\n"
+            "─────────────────────────────"
+        )
+    except Exception as exc:
+        logger.error("Failed to read treatment logs: %s", exc)
+        return "Error reading treatment logs."
+
+
+def _get_yield_rate() -> float:
+    """Returns average weight gain per day in grams."""
+    if not HIVE_DATA_CSV.exists():
+        return 50.0  # fallback 50g per day
+    try:
+        with open(HIVE_DATA_CSV, "r") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        if len(lines) < 3:
+            return 50.0
+            
+        first_row = dict(zip(lines[0].split(","), lines[1].split(",")))
+        last_row = dict(zip(lines[0].split(","), lines[-1].split(",")))
+        
+        start_w = float(first_row.get("weight", 0))
+        end_w = float(last_row.get("weight", 0))
+        
+        # parse timestamp ISO format
+        fmt = "%Y-%m-%d %H:%M:%S"
+        try:
+            start_t = datetime.strptime(first_row.get("datestamp", "").split(".")[0], fmt)
+            end_t = datetime.strptime(last_row.get("datestamp", "").split(".")[0], fmt)
+            days_diff = (end_t - start_t).total_seconds() / 86400.0
+        except ValueError:
+            days_diff = 1.0
+            
+        if days_diff < 0.1:
+            return 50.0
+            
+        rate = (end_w - start_w) / days_diff
+        return rate if rate > 0 else 50.0 # assume positive yield for forecasting
+    except Exception:
+        return 50.0
+
+
+def _forecast_yield_time(target_weight: float) -> str:
+    rate = _get_yield_rate()
+    current_w = 0.0
+    row = _latest_sensor_row_dict()
+    if row:
+        current_w = float(row.get("weight", 0))
+        
+    if current_w >= target_weight:
+        return f"Target weight `{target_weight}g` already reached or exceeded. Current weight: `{current_w}g`"
+        
+    days_needed = (target_weight - current_w) / rate
+    est_date = datetime.now() + timedelta(days=days_needed)
+    return (
+        f"Target Weight: `{target_weight}g`\n"
+        f"Current Weight: `{current_w}g`\n"
+        f"Estimated Rate: `{rate:.1f}g / day`\n\n"
+        f"Estimated time to reach target: `{days_needed:.1f} days`\n"
+        f"Expected Date: `{est_date.strftime('%Y-%m-%d')}`"
+    )
+
+
+def _forecast_yield_weight(days: float) -> str:
+    rate = _get_yield_rate()
+    current_w = 0.0
+    row = _latest_sensor_row_dict()
+    if row:
+        current_w = float(row.get("weight", 0))
+        
+    gained = rate * days
+    final_w = current_w + gained
+    est_date = datetime.now() + timedelta(days=days)
+    return (
+        f"Forecast Days: `{days} days`\n"
+        f"Current Weight: `{current_w}g`\n"
+        f"Estimated Rate: `{rate:.1f}g / day`\n\n"
+        f"Expected Weight on `{est_date.strftime('%Y-%m-%d')}`: `{final_w:.1f}g`\n"
+        f"Total Expected Gain: `{gained:.1f}g`"
+    )
+
 # ----------------------------------------------------------------------
 # Callback query router
 # ----------------------------------------------------------------------
@@ -307,6 +425,7 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "start_init_member", "stop_script_member", "change_calibration", "tare_hive",
         "check_pi_health", "system_info", "uptime_info", "download_data_csv",
         "manage_admins", "cal_mode_bottle", "cal_mode_standard", "request_photo",
+        "menu_varroa", "menu_yield", "treatment_stats", "forecast_days", "forecast_weight",
     }
     if action in restricted_actions and not is_approved(uid):
         await query.answer("Access Denied. Approved Admin status required.", show_alert=True)
@@ -363,6 +482,41 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(
             f"*LATEST TELEMETRY SNAPSHOT*\n\n{text}",
             reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "menu_varroa":
+        await query.edit_message_text(
+            "*VARROA MANAGEMENT*\n\nSelect an operation below:",
+            reply_markup=keyboards.varroa_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "menu_yield":
+        await query.edit_message_text(
+            "*YIELD FORECASTING*\n\nSelect a forecasting mode below:",
+            reply_markup=keyboards.yield_forecasting_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "treatment_stats":
+        stats_text = _treatment_stats_text()
+        await query.edit_message_text(
+            stats_text,
+            reply_markup=keyboards.back_to_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "forecast_days":
+        context.user_data["awaiting_forecast_weight"] = True
+        context.user_data["awaiting_forecast_days"] = False
+        await query.edit_message_text(
+            "*Yield Forecasting: Time to Target Weight*\n\n"
+            "Enter the target honey weight in grams (e.g., `5000`):",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    elif action == "forecast_weight":
+        context.user_data["awaiting_forecast_days"] = True
+        context.user_data["awaiting_forecast_weight"] = False
+        await query.edit_message_text(
+            "*Yield Forecasting: Weight in N Days*\n\n"
+            "Enter the number of days from now (e.g., `14`):",
             parse_mode=ParseMode.MARKDOWN,
         )
     elif action == "request_photo":
@@ -687,6 +841,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=str(user.id),
             flag="awaiting_bottle_test_weight",
             success_msg="🎉 *Bottle Calibrated Successfully!* Monitor RUNNING with test weight `{w}`g.",
+        )
+        return
+
+    if context.user_data.get("awaiting_forecast_weight"):
+        try:
+            target_weight = float(text)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid number. Please enter a numerical weight in grams.")
+            return
+        context.user_data["awaiting_forecast_weight"] = False
+        forecast = _forecast_yield_time(target_weight)
+        await update.message.reply_text(
+            f"*Yield Forecast*\n\n{forecast}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if context.user_data.get("awaiting_forecast_days"):
+        try:
+            days = float(text)
+        except ValueError:
+            await update.message.reply_text("❌ Invalid number. Please enter a numerical number of days.")
+            return
+        context.user_data["awaiting_forecast_days"] = False
+        forecast = _forecast_yield_weight(days)
+        await update.message.reply_text(
+            f"*Yield Forecast*\n\n{forecast}",
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 

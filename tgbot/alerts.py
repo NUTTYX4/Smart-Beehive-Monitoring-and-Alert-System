@@ -91,9 +91,10 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
 
     if ai_behavior:
         status = ai_behavior
-        if "Triggered" in ai_behavior:
+        # Explicit acoustic stress alerts for enterprise presentation
+        if "Triggered" in ai_behavior or "Swarm" in ai_behavior or "Queenless" in ai_behavior:
             alerts.append(
-                f"[CRITICAL] Colony Distress State Triggered (AI Confidence: {ai_confidence:.0%})"
+                f"[CRITICAL] AI Acoustic Classification: {ai_behavior.upper()} (Confidence: {ai_confidence:.0%})"
             )
     else:
         status, freq_alert = classify_behavior(dominant_freq)
@@ -112,12 +113,21 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
         alerts.append(f"[ALERT] Internal Temp High: {t:.1f}°C (Max Allowed: {limits['temp_high']}°C)")
     elif t < limits["temp_low"]:
         alerts.append(f"[ALERT] Internal Temp Low: {t:.1f}°C (Min Allowed: {limits['temp_low']}°C)")
+    
+    # Thermodynamic Differential Alert (Internal vs Ambient)
+    if ambient and ambient.get("valid"):
+        out_temp = float(ambient.get("temperature", 25.0))
+        temp_delta = t - out_temp
+        if temp_delta < -3.0 and out_temp > 15.0:
+            alerts.append(f"[CRITICAL] THERMODYNAMIC BREACH: Internal hive is {abs(temp_delta):.1f}°C colder than ambient. Probable structural crack or severe cluster death.")
+
     if h < limits["humid_low"]:
         alerts.append(f"[ALERT] Internal Humidity Low: {h:.1f}% RH (Min Allowed: {limits['humid_low']}%)")
     elif h > limits["humid_high"]:
         alerts.append(f"[ALERT] Internal Humidity High: {h:.1f}% RH (Max Allowed: {limits['humid_high']}%)")
 
     w = sensor["weight"]
+    is_sudden_weight_drop = False
     if w < -2.0:  # Allow minimal settling jitter around 0g tare
         alerts.append(f"[ALERT] Negative Weight Reading: {w:.2f} g")
     if w > WEIGHT_MAX_VALID:
@@ -125,6 +135,8 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
     if ctx.prev_weight is not None and abs(w - ctx.prev_weight) >= WEIGHT_SUDDEN_JUMP:
         delta = w - ctx.prev_weight
         direction = "Gain" if delta > 0 else "Loss"
+        if delta < 0:
+            is_sudden_weight_drop = True
         alerts.append(f"[ALERT] Rapid Weight {direction}: {ctx.prev_weight:.2f} g -> {w:.2f} g (Δ {delta:+.2f} g)")
 
     ax, ay, az = sensor["accel_x"], sensor["accel_y"], sensor["accel_z"]
@@ -132,28 +144,37 @@ def build_alerts(sensor: Dict, dominant_freq: float, ctx: AlertContext) -> Tuple
     gx, gy, gz = sensor["gyro_x"], sensor["gyro_y"], sensor["gyro_z"]
     gyro_mag = (gx**2 + gy**2 + gz**2) ** 0.5
 
+    is_motion_spike = False
     # Use total vector magnitude rather than rigid Z-axis check to prevent false orientation alarms
     if abs(accel_mag - 1.0) > ACCEL_MAG_TOLERANCE:
+        is_motion_spike = True
         alerts.append(f"[WARNING] Structural Shock or Tilt Detected: |a|={accel_mag:.2f}g")
     if any(abs(g) > GYRO_ABS_ALERT for g in (gx, gy, gz)):
+        is_motion_spike = True
         alerts.append(f"[WARNING] High Angular Velocity: Gx={gx:.1f}, Gy={gy:.1f}, Gz={gz:.1f} dps")
 
     if ctx.prev_accel_mag is not None and abs(accel_mag - ctx.prev_accel_mag) >= MOTION_ACCEL_DELTA:
         d = accel_mag - ctx.prev_accel_mag
         direction = "spike" if d > 0 else "drop"
+        if d > 0: is_motion_spike = True
         alerts.append(f"[NOTICE] Acceleration {direction}: {ctx.prev_accel_mag:.2f}g -> {accel_mag:.2f}g (Δ {d:+.2f}g)")
 
     if ctx.prev_gyro_mag is not None and abs(gyro_mag - ctx.prev_gyro_mag) >= MOTION_GYRO_DELTA:
         d = gyro_mag - ctx.prev_gyro_mag
         direction = "spike" if d > 0 else "drop"
+        if d > 0: is_motion_spike = True
         alerts.append(f"[NOTICE] Rotational rate {direction}: {ctx.prev_gyro_mag:.1f} -> {gyro_mag:.1f} dps (Δ {d:+.1f})")
+
+    # Multi-Sensor Fusion: Theft Detection
+    if is_motion_spike and is_sudden_weight_drop:
+        alerts.append("[CRITICAL] THEFT OR VANDALISM DETECTED: Simultaneous violent movement and mass drop confirmed.")
 
     mite_count = sensor.get("mite_count", 0)
     if mite_count >= MITE_THRESHOLD:
-        alerts.append(f"[CRITICAL] ⚔️ DANGER: Varroa Mite Infestation Limit Exceeded! ({mite_count} detected)")
+        alerts.append(f"[CRITICAL] DANGER: Varroa Mite Infestation Limit Exceeded! ({mite_count} detected)")
         
     if sensor.get("vaporizer_active", False):
-        alerts.append("[NOTICE] 💨 Treatment Active: Oxalic Acid Vaporizer Triggered")
+        alerts.append(f"[NOTICE] Treatment Active: Oxalic Acid Vaporizer Triggered (Mites: {mite_count})")
 
     ctx.prev_freq = dominant_freq
     ctx.prev_weight = w
