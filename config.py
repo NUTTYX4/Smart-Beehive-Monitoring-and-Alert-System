@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 config.py
 =========
@@ -60,6 +60,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 HIVE_DATA_CSV: Final[Path] = DATA_DIR / "hive_update.csv"
+TREATMENT_LOG_CSV: Final[Path] = DATA_DIR / "treatment_log.csv"
 CALIBRATION_FILE: Final[Path] = DATA_DIR / "calibration.json"
 MEMBERS_FILE: Final[Path] = DATA_DIR / "members.json"
 APP_LOG_FILE: Final[Path] = LOG_DIR / "beehive.log"

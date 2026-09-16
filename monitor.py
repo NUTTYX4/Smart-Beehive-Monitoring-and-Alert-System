@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 monitor.py
@@ -233,7 +233,10 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, cs
         from tgbot.alerts import send_photo
         photo_path = "data/latest_vision.jpg"
         if os.path.exists(photo_path):
-            send_photo(TELEGRAM_LOG_CHANNEL, photo_path, caption=f"🚨 *VAPORIZER TRIGGERED*\nMite count: {mite_count}")
+            send_photo(TELEGRAM_LOG_CHANNEL, photo_path, caption=f"[NOTICE] VAPORIZER TRIGGERED\nMite count: {mite_count}")
+            
+        from config import TREATMENT_DURATION_S
+        csv_logger.log_treatment(sensor["datestamp"], mite_count, TREATMENT_DURATION_S)
 
     csv_logger.log(sensor, behavior=behavior)
     thingspeak.upload_all(sensor)
