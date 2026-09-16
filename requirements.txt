@@ -42,3 +42,7 @@ opencv-python>=4.8 ; platform_machine != "aarch64" and platform_machine != "armv
 
 # YOLOv8 Nano inference
 ultralytics>=8.1
+
+onnx>=1.15.0
+onnxruntime>=1.17.0
+flask>=3.0.0
