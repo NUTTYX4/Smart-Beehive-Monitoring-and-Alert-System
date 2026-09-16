@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 tests/test_vision.py
-=====================
-Live hardware diagnostic for the YOLOv8 Nano Varroa Mite detection model.
-Uses the USB webcam to run live inference and draws bounding boxes around detected mites.
+========================
+A clean, native local window for the live camera feed that completely 
+bypasses the OpenCV cv2.imshow() Wayland crash. 
+Uses standard Tkinter to create a well-established desktop popup.
 
 Run:
+    pip install Pillow
     python3 tests/test_vision.py
 """
 
@@ -14,6 +16,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import cv2
+import tkinter as tk
+from PIL import Image, ImageTk
 from ultralytics import YOLO
 
 # Paths
@@ -24,22 +28,20 @@ CAPTURE_H = 720
 
 def main():
     print("==================================================")
-    print("  BeeHive | Live YOLOv8 Mite Detection Test")
+    print("  BeeHive | Native Live Mite Detection (GUI)")
     print("==================================================")
 
     if not os.path.exists(MODEL_PATH):
-        print(f"\nERROR: Model not found at {MODEL_PATH}")
-        print("Please ensure the training has finished and the model is saved.")
+        print(f"ERROR: Model not found at {MODEL_PATH}")
         sys.exit(1)
 
-    print("\nLoading YOLOv8 Nano model...")
-    model = YOLO(MODEL_PATH)
+    print("Loading YOLOv8 Nano model...")
+    model = YOLO(MODEL_PATH, task='detect')
     print("Model loaded successfully.")
 
-    print("\nOpening camera (/dev/video0 via V4L2)...")
+    print("\nOpening camera...")
     cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
     if not cap.isOpened():
-        # Fallback for generic USB Cam
         cap = cv2.VideoCapture(CAM_INDEX)
 
     if not cap.isOpened():
@@ -49,29 +51,24 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
     cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    print("\nLive inference started. Press 'q' or 'ESC' to quit.")
+    # Set up Tkinter Native Window
+    root = tk.Tk()
+    root.title("BeeHive - Native Live Vision")
+    root.geometry(f"{CAPTURE_W}x{CAPTURE_H}")
+    root.configure(bg="black")
 
-    window_name = "Varroa Mite Detection (Live)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, CAPTURE_W, CAPTURE_H)
+    video_label = tk.Label(root, bg="black")
+    video_label.pack(fill=tk.BOTH, expand=True)
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Warning: Missed frame.")
-                continue
-
+    def update_frame():
+        ret, frame = cap.read()
+        if ret:
             # Run YOLO inference
-            # conf=0.5 -> Only show detections with > 50% confidence
             results = model.predict(source=frame, conf=0.5, verbose=False)
-            
-            # The results object contains the annotated image
             annotated_frame = results[0].plot()
 
-            # Display mite count on screen
+            # Display mite count
             mite_count = len(results[0].boxes)
             cv2.putText(
                 annotated_frame, 
@@ -84,16 +81,28 @@ def main():
                 cv2.LINE_AA
             )
 
-            cv2.imshow(window_name, annotated_frame)
+            # Convert from BGR (OpenCV) to RGB (PIL)
+            color_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(color_frame)
+            imgtk = ImageTk.PhotoImage(image=img)
+            
+            # Update label
+            video_label.imgtk = imgtk
+            video_label.configure(image=imgtk)
+        
+        # Loop every 15 milliseconds
+        root.after(15, update_frame)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), 27):
-                break
-
-    finally:
+    def on_closing():
         cap.release()
-        cv2.destroyAllWindows()
+        root.destroy()
         print("\nTest completed.")
+
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+
+    print("\nNative window opening... Close the window to quit.")
+    update_frame()
+    root.mainloop()
 
 if __name__ == "__main__":
     main()
