@@ -15,7 +15,7 @@ import time
 import subprocess
 from pathlib import Path
 
-DATA_DIR = Path("dataset/raw")
+DATA_DIR = Path("dataset_v2/raw")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def main():
