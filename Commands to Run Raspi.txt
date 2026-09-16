@@ -1,0 +1,48 @@
+# Navigation and Setup
+cd ~/BeeHiveMonitor                           # Go to the project directory
+git pull origin feature/yolo-mite-detection   # Pull the latest code (adjust branch as needed)
+pip install -r requirements.txt               # Install Python dependencies
+sudo ./install.sh                             # Run the setup script for services and environment
+
+# Virtual Environment
+source venv/bin/activate                      # Activate the virtual environment
+deactivate                                    # Deactivate the virtual environment
+
+
+# Systemd Service Management (beehive.service)
+sudo systemctl status beehive.service         # Check if the bot/monitor service is running
+sudo systemctl start beehive.service          # Start the bot service manually
+sudo systemctl stop beehive.service           # Stop the bot service manually
+sudo systemctl restart beehive.service        # Restart the bot service (useful after code changes)
+
+# Checking Logs
+journalctl -u beehive.service -f              # View real-time logs for the beehive service
+tail -f logs/beehive.log                      # View the application's local log file
+
+# Running Scripts Manually (for debugging)
+python3 bot.py                                # Run the Telegram bot manually in the foreground
+python3 monitor.py 650 "Dev User" 123456789   # Run the monitor directly (bypassing the bot)
+
+# Hardware Diagnostics
+arecord -l                                    # List audio capture devices (verify INMP441 mic is detected)
+i2cdetect -y 1                                # Check I2C devices (MPU6050 should show up at 0x68)
+timedatectl status                            # Check if the system time is synced (NTP)
+
+# Git Version Control
+git status                                    # Check the current status of your files (modified, untracked, etc.)
+git branch                                    # List all local branches (the current branch has an asterisk *)
+git checkout <branch-name>                    # Switch to an existing branch (e.g., git checkout main)
+git checkout -b <new-branch-name>             # Create and switch to a new branch
+
+# Staging and Committing Changes
+git add <file-name>                           # Add a specific file to be committed
+git add .                                     # Add ALL modified and new files in the current directory
+git commit -m "Your descriptive message here" # Commit the staged changes with a message
+
+# Syncing with GitHub (Remote Repository)
+git pull origin <branch-name>                 # Pull the latest changes from GitHub (e.g., git pull origin main)
+git push origin <branch-name>                 # Push your local commits to GitHub (e.g., git push origin main)
+
+# Undoing Changes
+git restore <file-name>                       # Undo local modifications to a file (before staging/adding)
+git reset HEAD <file-name>                    # Unstage a file (if you accidentally ran `git add`)

@@ -1,0 +1,10 @@
+# YOLOv8 Dataset Configuration — Auto-generated
+# Do not edit manually; re-run auto_label.py to regenerate.
+
+path: C:/Users/Nithin/OneDrive - presidencyuniversity.in/Smart Beehive/BeeHiveMonitor/ai_module/camera_model/vision_dataset
+train: images/train
+val: images/val
+
+nc: 1
+names:
+  0: varroa_mite
