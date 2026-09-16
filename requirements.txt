@@ -4,7 +4,7 @@
 # ============================================================
 
 # Core
-numpy>=1.26,<2.0
+numpy<2
 scipy>=1.11
 certifi>=2024.2.2
 requests>=2.31
@@ -46,3 +46,5 @@ ultralytics>=8.1
 onnx>=1.15.0
 onnxruntime>=1.17.0
 flask>=3.0.0
+werkzeug>=3.0.0
+
