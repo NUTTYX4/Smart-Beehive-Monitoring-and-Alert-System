@@ -47,7 +47,7 @@ except ImportError:
 # --------------------------------------------------------------------------
 # Constants (can be overridden via constructor kwargs)
 # --------------------------------------------------------------------------
-_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano.onnx"
+_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano_v2.onnx"
 _DEFAULT_CAM_INDEX   = 0
 _DEFAULT_INFER_EVERY = 60      # seconds between AI scans
 _CAPTURE_W           = 1280
