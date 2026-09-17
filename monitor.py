@@ -63,7 +63,7 @@ def _handle_shutdown(signum, frame) -> None:  # noqa: ANN001
     _shutdown_requested = True
 
 
-def _build_hive_update_message(sensor: dict, behavior: str) -> str:
+def _build_hive_update_message(sensor: dict, behavior: str, alerts: list) -> str:
     confidence_str = ""
     confidence = sensor.get("confidence", 0.0)
     if confidence and confidence > 0:
@@ -72,23 +72,33 @@ def _build_hive_update_message(sensor: dict, behavior: str) -> str:
     weather = weather_service.get_current_conditions()
     loc_str = weather.get("city", "Auto-IP")
     if weather.get("valid"):
-        ext_str = f"`{weather['temperature']:.1f} Â°C` | `{weather['humidity']:.1f}% RH` ({weather['description']})"
+        ext_str = f"`{weather['temperature']:.1f} C` | `{weather['humidity']:.1f}% RH` ({weather['description']})"
     else:
         ext_str = "`Unavailable (Offline)`"
+        
+    has_critical = any("CRITICAL" in a for a in alerts)
+    has_alerts = len(alerts) > 0
+
+    if has_critical:
+        status_msg = "🔴 *CRITICAL:* Multiple Alerts Detected"
+    elif has_alerts:
+        status_msg = "🟡 *WARNING:* Abnormalities Detected"
+    else:
+        status_msg = "🟢 *ONLINE:* Nominal Operations"
 
     return f"""
-*BEEHIVE TELEMETRY REPORT*
-Timestamp: `{sensor['datestamp']}` | Location: `{loc_str}`
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+🐝 *BEEHIVE TELEMETRY REPORT*
+📅 Timestamp: `{sensor['datestamp']}` | 📍 Location: `{loc_str}`
+----------------------------------------
 *Colony State:* `{behavior}`{confidence_str}
-*Internal Climate:* `{sensor['temperature']:.1f} Â°C` | `{sensor['humidity']:.1f}% RH`
+*Internal Climate:* `{sensor['temperature']:.1f} C` | `{sensor['humidity']:.1f}% RH`
 *External Weather:* {ext_str}
 *Scale Net Weight:* `{sensor['weight']:.2f} g`
 *Acoustic Signature:* `{sensor['dominant_freq']:.2f} Hz`
 *Structural Integrity:* Nominal (Vector stable)
-*ðŸ“· Computer Vision:* `Mite Count: {sensor.get('mite_count', 0)}`
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-Status: [ONLINE] Nominal Operations
+*📷 Computer Vision:* `Mite Count: {sensor.get('mite_count', 0)}`
+----------------------------------------
+{status_msg}
 """.strip()
 
 
@@ -226,7 +236,7 @@ def _run_cycle(hx711, mpu6050, dht22, inmp441, relay_actuator, vision_engine, cs
 
     alerts, behavior = build_alerts(sensor, sensor["dominant_freq"], ctx)
 
-    message = _build_hive_update_message(sensor, behavior)
+    message = _build_hive_update_message(sensor, behavior, alerts)
     send_data_and_alerts(TELEGRAM_LOG_CHANNEL, message, alerts)
 
     if vaporizer_active:
