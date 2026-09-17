@@ -47,7 +47,7 @@ except ImportError:
 # --------------------------------------------------------------------------
 # Constants (can be overridden via constructor kwargs)
 # --------------------------------------------------------------------------
-_DEFAULT_MODEL_PATH  = "ai_module/camera_model/varroa_nano_v2.onnx"
+_DEFAULT_MODEL_PATH  = "varroa_nano_v2.onnx"
 _DEFAULT_CAM_INDEX   = 0
 _DEFAULT_INFER_EVERY = 60      # seconds between AI scans
 _CAPTURE_W           = 1280
@@ -230,48 +230,46 @@ class VarroaVisionEngine:
             time.sleep(0.1)
 
         while not self._stop_event.is_set():
-            # Sleep in small chunks so we can respond to stop_event quickly
+            with self._lock:
+                frame = self._latest_frame.copy() if self._latest_frame is not None else None
+
+            if frame is not None:
+                try:
+                    results = self._model.predict(
+                        source=frame,
+                        conf=_CONF_THRESHOLD,
+                        verbose=False,
+                        device="cpu",   # force CPU — no CUDA on Pi 4
+                        half=False,     # half-precision only useful on GPU
+                    )
+                    count = len(results[0].boxes) if results else 0
+                    ts    = time.time()
+
+                    try:
+                        out_path = Path("data/latest_vision.jpg")
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        cv2.imwrite(str(out_path), results[0].plot())
+                    except Exception as exc:
+                        logger.error("Failed to save vision frame: %s", exc)
+
+                    with self._lock:
+                        self._latest_result = {
+                            "mite_count": count,
+                            "available":  True,
+                            "last_scan_ts": ts,
+                        }
+
+                    logger.info(
+                        "VarroaVisionEngine: scan complete — %d mite(s) detected.", count
+                    )
+                except Exception as exc:
+                    logger.error("VarroaVisionEngine inference error: %s", exc)
+
+            # Sleep in small chunks AFTER inference
             for _ in range(int(self._infer_every * 10)):
                 if self._stop_event.is_set():
                     return
                 time.sleep(0.1)
-
-            with self._lock:
-                frame = self._latest_frame.copy() if self._latest_frame is not None else None
-
-            if frame is None:
-                continue
-
-            try:
-                results = self._model.predict(
-                    source=frame,
-                    conf=_CONF_THRESHOLD,
-                    verbose=False,
-                    device="cpu",   # force CPU — no CUDA on Pi 4
-                    half=False,     # half-precision only useful on GPU
-                )
-                count = len(results[0].boxes) if results else 0
-                ts    = time.time()
-
-                try:
-                    out_path = Path("data/latest_vision.jpg")
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    cv2.imwrite(str(out_path), results[0].plot())
-                except Exception as exc:
-                    logger.error("Failed to save vision frame: %s", exc)
-
-                with self._lock:
-                    self._latest_result = {
-                        "mite_count": count,
-                        "available":  True,
-                        "last_scan_ts": ts,
-                    }
-
-                logger.info(
-                    "VarroaVisionEngine: scan complete — %d mite(s) detected.", count
-                )
-            except Exception as exc:
-                logger.error("VarroaVisionEngine inference error: %s", exc)
 
     # ------------------------------------------------------------------
     # Legacy static-image helper (unchanged)
