@@ -523,9 +523,14 @@ async def manage_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("📷 Capturing... this might take a moment.", show_alert=True)
         photo_path = "data/latest_vision.jpg"
         if not os.path.exists(photo_path):
+            import time
+            now_str = time.strftime('%H:%M:%S')
             await query.edit_message_text(
-                "❌ No recent photo available. Ensure the monitor is running.",
-                reply_markup=keyboards.back_to_menu()
+                f"❌ *No recent photo available.*\n\n"
+                f"Ensure the monitor is running and wait at least 60 seconds for the first AI scan to complete.\n\n"
+                f"_Last checked: {now_str}_",
+                reply_markup=keyboards.back_to_menu(),
+                parse_mode=ParseMode.MARKDOWN
             )
             return
         try:
